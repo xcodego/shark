@@ -51,9 +51,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lornshark/shark/sharkfunc"
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl/scram"
+	"github.com/xcodego/shark/sharkfunc"
 	"go.uber.org/zap"
 )
 

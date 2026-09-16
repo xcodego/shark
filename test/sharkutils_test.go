@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/lornshark/shark/sharkutils"
+	"github.com/xcodego/shark/sharkutils"
 )
 
 func TestRandNum(t *testing.T) {

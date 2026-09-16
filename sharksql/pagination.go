@@ -1,7 +1,7 @@
 package sharksql
 
 import (
-	"github.com/lornshark/shark/sharkerror"
+	"github.com/xcodego/shark/sharkerror"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )

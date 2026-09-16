@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/lornshark/shark/sharkerror"
-	"github.com/lornshark/shark/sharkhttp"
+	"github.com/xcodego/shark/sharkerror"
+	"github.com/xcodego/shark/sharkhttp"
 	"go.uber.org/zap"
 )
 

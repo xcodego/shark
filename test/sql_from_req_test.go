@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/lornshark/shark/sharksql"
 	"github.com/shopspring/decimal"
+	"github.com/xcodego/shark/sharksql"
 )
 
 // ========== Where 测试 (sql tag) ==========

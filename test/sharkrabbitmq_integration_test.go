@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lornshark/shark/sharkrabbitmq"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/xcodego/shark/sharkrabbitmq"
 	"go.uber.org/zap"
 )
 

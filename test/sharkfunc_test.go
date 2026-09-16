@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lornshark/shark/sharkfunc"
+	"github.com/xcodego/shark/sharkfunc"
 )
 
 func TestWithTimeoutSuccess(t *testing.T) {

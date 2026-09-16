@@ -3,8 +3,8 @@ package test
 import (
 	"testing"
 
-	"github.com/lornshark/shark/sharkdecimal"
 	"github.com/shopspring/decimal"
+	"github.com/xcodego/shark/sharkdecimal"
 )
 
 func TestNormalize2(t *testing.T) {

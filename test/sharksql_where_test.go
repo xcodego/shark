@@ -3,7 +3,7 @@ package test
 import (
 	"testing"
 
-	"github.com/lornshark/shark/sharksql"
+	"github.com/xcodego/shark/sharksql"
 )
 
 // ---------------------------------------------------------------------------

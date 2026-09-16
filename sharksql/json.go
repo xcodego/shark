@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lornshark/shark/sharkjson"
 	"github.com/spf13/cast"
+	"github.com/xcodego/shark/sharkjson"
 )
 
 // ========== MySQL JSON 函数封装 ==========

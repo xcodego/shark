@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lornshark/shark/sharketcd"
+	"github.com/xcodego/shark/sharketcd"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 

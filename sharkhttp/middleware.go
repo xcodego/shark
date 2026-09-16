@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"runtime/debug"
 
-	"github.com/lornshark/shark/sharkerror"
+	"github.com/xcodego/shark/sharkerror"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"

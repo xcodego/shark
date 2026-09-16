@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lornshark/shark/sharktimer"
 	"github.com/redis/go-redis/v9"
+	"github.com/xcodego/shark/sharktimer"
 )
 
 // mockTimerRedis 实现 sharktimer.TimerRedis 接口，用于单元测试。

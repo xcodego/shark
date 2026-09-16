@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lornshark/shark/sharkdb"
-	"github.com/lornshark/shark/sharksql"
+	"github.com/xcodego/shark/sharkdb"
+	"github.com/xcodego/shark/sharksql"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )

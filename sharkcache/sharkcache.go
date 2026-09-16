@@ -3,7 +3,7 @@ package sharkcache
 import (
 	"errors"
 
-	"github.com/lornshark/shark/sharkfunc"
+	"github.com/xcodego/shark/sharkfunc"
 	"golang.org/x/sync/singleflight"
 )
 

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/lornshark/shark/sharkerror"
+	"github.com/xcodego/shark/sharkerror"
 )
 
 func TestErrorNew(t *testing.T) {

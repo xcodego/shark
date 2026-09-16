@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lornshark/shark/sharkverify"
+	"github.com/xcodego/shark/sharkverify"
 )
 
 func TestVerifyCodeInvalid(t *testing.T) {

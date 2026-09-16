@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/lornshark/shark/sharksnowflake"
+	"github.com/xcodego/shark/sharksnowflake"
 )
 
 func TestSnowflakeGenerate(t *testing.T) {

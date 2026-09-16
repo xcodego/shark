@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lornshark/shark/sharkminio"
 	"github.com/minio/minio-go/v7"
+	"github.com/xcodego/shark/sharkminio"
 )
 
 func TestMinioNew(t *testing.T) {

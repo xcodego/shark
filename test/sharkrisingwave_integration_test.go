@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lornshark/shark/sharkrisingwave"
+	"github.com/xcodego/shark/sharkrisingwave"
 	"go.uber.org/zap"
 )
 

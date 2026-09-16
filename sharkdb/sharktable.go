@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/lornshark/shark/sharksql"
+	"github.com/xcodego/shark/sharksql"
 	"gorm.io/gorm"
 )
 

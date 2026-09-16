@@ -25,8 +25,8 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/howeyc/crc16"
-	"github.com/lornshark/shark/sharkfunc"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/xcodego/shark/sharkfunc"
 	"go.uber.org/zap"
 )
 

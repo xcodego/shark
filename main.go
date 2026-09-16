@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/lornshark/shark/sharkapp"
+	"github.com/xcodego/shark/sharkapp"
 )
 
 // @title game-demo API

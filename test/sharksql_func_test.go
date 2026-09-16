@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lornshark/shark/sharksql"
+	"github.com/xcodego/shark/sharksql"
 )
 
 func TestEq(t *testing.T) {

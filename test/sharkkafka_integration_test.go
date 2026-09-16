@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lornshark/shark/sharkkafka"
 	"github.com/segmentio/kafka-go"
+	"github.com/xcodego/shark/sharkkafka"
 	"go.uber.org/zap"
 )
 

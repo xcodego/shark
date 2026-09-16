@@ -25,7 +25,7 @@
 //
 // 使用示例：
 //
-//	import "github.com/lornshark/shark/sharksql"
+//	import "github.com/xcodego/shark/sharksql"
 //
 //	// 构建查询条件
 //	db.Where(

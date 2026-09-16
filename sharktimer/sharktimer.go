@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lornshark/shark/sharksnowflake"
+	"github.com/xcodego/shark/sharksnowflake"
 
 	"github.com/panjf2000/ants/v2"
 	"github.com/redis/go-redis/v9"

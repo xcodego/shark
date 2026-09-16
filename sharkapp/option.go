@@ -8,16 +8,16 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lornshark/shark/sharkdb"
-	"github.com/lornshark/shark/sharkelastic"
-	"github.com/lornshark/shark/sharketcd"
-	"github.com/lornshark/shark/sharkkafka"
-	"github.com/lornshark/shark/sharkminio"
-	"github.com/lornshark/shark/sharkmongodb"
-	"github.com/lornshark/shark/sharkrabbitmq"
-	"github.com/lornshark/shark/sharkredis"
-	"github.com/lornshark/shark/sharkrisingwave"
 	"github.com/spf13/viper"
+	"github.com/xcodego/shark/sharkdb"
+	"github.com/xcodego/shark/sharkelastic"
+	"github.com/xcodego/shark/sharketcd"
+	"github.com/xcodego/shark/sharkkafka"
+	"github.com/xcodego/shark/sharkminio"
+	"github.com/xcodego/shark/sharkmongodb"
+	"github.com/xcodego/shark/sharkrabbitmq"
+	"github.com/xcodego/shark/sharkredis"
+	"github.com/xcodego/shark/sharkrisingwave"
 )
 
 // Options 是应用的配置集合，包含了所有中间件的连接配置。

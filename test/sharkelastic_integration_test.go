@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lornshark/shark/sharkelastic"
 	"github.com/tidwall/gjson"
+	"github.com/xcodego/shark/sharkelastic"
 )
 
 func TestElasticNew(t *testing.T) {

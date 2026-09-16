@@ -3,7 +3,7 @@ package test
 import (
 	"testing"
 
-	"github.com/lornshark/shark/sharkzip"
+	"github.com/xcodego/shark/sharkzip"
 )
 
 func TestCompressDecompress(t *testing.T) {

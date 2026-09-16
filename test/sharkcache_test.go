@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/lornshark/shark/sharkcache"
+	"github.com/xcodego/shark/sharkcache"
 )
 
 type testItem struct {

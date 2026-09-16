@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lornshark/shark/sharkmongodb"
+	"github.com/xcodego/shark/sharkmongodb"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 

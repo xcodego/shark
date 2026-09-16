@@ -1,4 +1,4 @@
-module github.com/lornshark/shark
+module github.com/xcodego/shark
 
 go 1.26
 

@@ -3,7 +3,7 @@ package test
 import (
 	"testing"
 
-	"github.com/lornshark/shark/sharkjson"
+	"github.com/xcodego/shark/sharkjson"
 )
 
 type testUser struct {

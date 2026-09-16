@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lornshark/shark/sharkelastic"
-	"github.com/lornshark/shark/sharkeswhere"
+	"github.com/xcodego/shark/sharkelastic"
+	"github.com/xcodego/shark/sharkeswhere"
 )
 
 // ---------------------------------------------------------------------------

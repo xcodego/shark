@@ -46,7 +46,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/lornshark/shark/sharksnowflake"
+	"github.com/xcodego/shark/sharksnowflake"
 
 	"github.com/bytedance/sonic"
 	"github.com/segmentio/kafka-go"

@@ -15,8 +15,8 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/elastic/go-elasticsearch/v9"
 	"github.com/elastic/go-elasticsearch/v9/esapi"
-	"github.com/lornshark/shark/sharkeswhere"
 	"github.com/tidwall/gjson"
+	"github.com/xcodego/shark/sharkeswhere"
 	"github.com/xuri/excelize/v2"
 )
 

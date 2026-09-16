@@ -8,7 +8,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/lornshark/shark/sharkredis"
+	"github.com/xcodego/shark/sharkredis"
 )
 
 func TestRedisNewCluster(t *testing.T) {

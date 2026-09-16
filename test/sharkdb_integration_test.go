@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lornshark/shark/sharkdb"
+	"github.com/xcodego/shark/sharkdb"
 	"go.uber.org/zap"
 )
 

@@ -3,7 +3,7 @@ package test
 import (
 	"testing"
 
-	"github.com/lornshark/shark/sharkauth"
+	"github.com/xcodego/shark/sharkauth"
 )
 
 func TestNormalizeAuthTree(t *testing.T) {

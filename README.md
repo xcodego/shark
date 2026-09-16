@@ -6,7 +6,7 @@
 
 Shark 封装了微服务开发中常见的中间件和工具库，提供统一的配置加载（`config.yaml`）、连接管理和最佳实践。各子包均可独立使用，无需依赖完整的框架上下文。
 
-**模块路径：** `github.com/lornshark/shark`
+**模块路径：** `github.com/xcodego/shark`
 
 **Go 版本要求：** 1.26+
 
@@ -30,7 +30,7 @@ Shark 封装了微服务开发中常见的中间件和工具库，提供统一�
 ### 安装
 
 ```bash
-go get github.com/lornshark/shark
+go get github.com/xcodego/shark
 ```
 
 ### 配置文件
@@ -64,7 +64,7 @@ kafka:
 ```go
 package main
 
-import "github.com/lornshark/shark/sharkapp"
+import "github.com/xcodego/shark/sharkapp"
 
 func main() {
     options := sharkapp.NewOption("myproject", "instance-1")
@@ -128,8 +128,8 @@ func (s *MyService) Start() {
 package main
 
 import (
-    "github.com/lornshark/shark/sharkapp"
-    "github.com/lornshark/shark/sharkdb"
+    "github.com/xcodego/shark/sharkapp"
+    "github.com/xcodego/shark/sharkdb"
 )
 
 func main() {
@@ -306,7 +306,7 @@ if sharksql.IsDuplicateKey(err) { /* 幂等处理 */ }
 ### 高精度数值 (`sharkdecimal`)
 
 ```go
-import sd "github.com/lornshark/shark/sharkdecimal"
+import sd "github.com/xcodego/shark/sharkdecimal"
 
 // 金额（2 位小数）
 price := sd.Normalize2(19.999)   // 19.99
@@ -340,7 +340,7 @@ for i := range ids { ids[i] = sf.Generate() }
 ### 缓存防击穿 (`sharkcache`)
 
 ```go
-import "github.com/lornshark/shark/sharkcache"
+import "github.com/xcodego/shark/sharkcache"
 
 // seeker 链：本地缓存 → Redis → DB（任一命中即返回）
 cache := sharkcache.New[User](
@@ -391,7 +391,7 @@ flat := sharkauth.Flatten(childTree)
 ### 错误处理 (`sharkerror`)
 
 ```go
-import "github.com/lornshark/shark/sharkerror"
+import "github.com/xcodego/shark/sharkerror"
 
 var ErrUserNotFound = sharkerror.New(10001, "用户不存在")
 var ErrDBError      = sharkerror.New(20001, "数据库错误")
@@ -643,7 +643,7 @@ original, _ := sharkzip.Decompress(compressed)
 
 ## 作者
 
-Lornshark
+xcodego
 
 ## 许可证
 

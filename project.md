@@ -3,10 +3,10 @@
 > ⚠️ **git 纪律：** 不要自动提交 git，除非我明确提出提交 git 的命令。
 
 ```
-模块路径: github.com/lornshark/shark
+模块路径: github.com/xcodego/shark
 Go 版本: 1.26+
 许可证: MIT
-作者: Lornshark
+作者: xcodego
 ```
 
 ## 一句话
@@ -233,7 +233,7 @@ sharkdecimal.Normalize(v, precision)
 | 文件 | 说明 |
 |---|---|
 | `main.go` | 项目入口，创建 `sharkapp.App`，注册业务组件并启动 |
-| `go.mod` | Go 模块定义 (`github.com/lornshark/shark`)，Go 1.26+ |
+| `go.mod` | Go 模块定义 (`github.com/xcodego/shark`)，Go 1.26+ |
 | `go.sum` | 依赖校验文件 (自动生成) |
 | `project.md` | 项目说明文档 (本文件) |
 | `README.md` | 项目 README |

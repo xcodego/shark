@@ -22,7 +22,7 @@
 //
 // 使用示例：
 //
-//	import sd "github.com/lornshark/shark/sharkdecimal"
+//	import sd "github.com/xcodego/shark/sharkdecimal"
 //
 //	// 金额计算（保留 2 位）
 //	price := sd.Normalize2(19.999)          // 19.99
@@ -74,7 +74,7 @@ const minRoundScale int32 = 8
 //
 // 使用示例：
 //
-//	import sd "github.com/lornshark/shark/sharkdecimal"
+//	import sd "github.com/xcodego/shark/sharkdecimal"
 //
 //	// 金额归一化
 //	amount := sd.Normalize2(19.999)       // → 19.99（截断）
@@ -148,7 +148,7 @@ func Normalize6(v any) decimal.Decimal {
 //
 // 使用示例：
 //
-//	import sd "github.com/lornshark/shark/sharkdecimal"
+//	import sd "github.com/xcodego/shark/sharkdecimal"
 //
 //	// 基本用法：截断到指定位数
 //	sd.Normalize(19.999, 2)       // → 19.99（截断，不是四舍五入！）
