@@ -299,6 +299,11 @@ func getFieldValue[T any](obj *T, name string) any {
 	if obj == nil {
 		return nil
 	}
+	if len(name) == 0 {
+		return nil
+	}
+	sp := strings.Split(name, ".")
+	name = sp[len(sp)-1]
 	v := reflect.ValueOf(obj)
 	if v.Kind() == reflect.Ptr {
 		v = v.Elem() // 解引用指针
