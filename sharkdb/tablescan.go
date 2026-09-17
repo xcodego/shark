@@ -16,6 +16,10 @@ import (
 
 // TableScan 提供基于 Keyset Pagination（游标分页）的高性能表扫描功能。
 //
+// 仅限后端内部代码使用：Asc/Desc 的排序字段必须是代码中固定的、可信的数据库列名，
+// 不得直接使用前端请求提交的字段名。该约束使调用方可以按索引设计组织排序字段，
+// 本工具不负责将不可信输入转换为排序列。
+//
 // 核心优势：
 // 相比传统 LIMIT/OFFSET 分页（SELECT * FROM user LIMIT 100000, 20），
 // TableScan 使用“上一条记录”作为游标进行分页：
@@ -176,7 +180,7 @@ func (p *TableScan[T]) PageSize(size int) *TableScan[T] {
 //  3. json tag（如 json:"create_time" → "create_time"）
 //
 // 参数：
-//   - columns: 排序字段名（可变参数）
+//   - columns: 后端代码中固定的排序字段名（可变参数，不得来自前端请求）
 //
 // 返回：*TableScan[T] 自身，支持链式调用
 //
@@ -200,7 +204,7 @@ func (p *TableScan[T]) Asc(columns ...string) *TableScan[T] {
 // Desc 添加降序排序字段。字段名匹配规则同 Asc。
 //
 // 参数：
-//   - columns: 排序字段名（可变参数）
+//   - columns: 后端代码中固定的排序字段名（可变参数，不得来自前端请求）
 //
 // 返回：*TableScan[T] 自身，支持链式调用
 //
@@ -563,6 +567,10 @@ func (p *TableScan[T]) Prev(db *gorm.DB, first *T) ([]T, error) {
 //	// 可选：移动文件到目标目录
 //	os.Rename(filePath, "/desired/path/users.xlsx")
 func (p *TableScan[T]) ExportExcel(ctx context.Context, db *gorm.DB, name string, header []any, cb func(T) []any) (string, error) {
+	// 导出必须有稳定排序；否则每次 LIMIT 可能读取同一页，导致导出无法结束。
+	if len(p.orders) == 0 {
+		return "", fmt.Errorf("tablescan export requires at least one sort order")
+	}
 	// 创建 Excel 文件
 	excelFile := excelize.NewFile()
 	defer excelFile.Close()
@@ -657,6 +665,10 @@ func (p *TableScan[T]) ExportExcel(ctx context.Context, db *gorm.DB, name string
 //	    },
 //	)
 func (p *TableScan[T]) ExportCsv(ctx context.Context, db *gorm.DB, name string, header []any, cb func(T) []any) (string, error) {
+	// 导出必须有稳定排序；否则每次 LIMIT 可能读取同一页，导致导出无法结束。
+	if len(p.orders) == 0 {
+		return "", fmt.Errorf("tablescan export requires at least one sort order")
+	}
 	fileName := fmt.Sprintf("%v_%v.csv", name, time.Now().Format("20060102150405"))
 	file, err := os.Create(path.Join(os.TempDir(), fileName))
 	if err != nil {

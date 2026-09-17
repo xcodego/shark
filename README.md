@@ -212,6 +212,8 @@ table.Eq("deleted", 0).Or(b).Gorm().Find(&tasks)
 
 #### `TableScan` — Keyset 游标分页
 
+`TableScan` 仅供后端内部代码使用。`Asc`/`Desc` 的字段必须是代码中固定的可信数据库列名，不能直接采用前端请求字段；导出前必须至少配置一个排序字段（建议最后一列唯一）。
+
 ```go
 scan := sharkdb.NewTableScan[User]().PageSize(500).Asc("create_time", "id")
 var last *User

@@ -127,6 +127,8 @@ sharksql.NewSql().Eq("status","pending").Or(sharksql.NewSql().Eq("status","done"
 sharksql.NewSql().EqCol("u.id","o.user_id")  // 字段对字段
 
 // Keyset 游标分页(深分页性能不衰减)
+// 仅限后端内部使用：排序字段必须是代码中固定的可信列名，不能来自前端请求。
+// ExportExcel/ExportCsv 必须先通过 Asc/Desc 配置至少一个排序字段。
 scan := sharkdb.NewTableScan[User]().PageSize(500).Asc("create_time")
 scan.Next(db.Where(...), lastCursor)   // 下一页
 scan.Prev(db.Where(...), firstCursor)  // 上一页
