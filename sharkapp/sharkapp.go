@@ -1,5 +1,5 @@
-// Package sharkapp 是 Shark 框架的核心应用层，提供了应用生命周期管理、
-// 中间件初始化、服务启动与优雅关闭等功能。
+// Package sharkapp 是 Shark 框架的核心应用层，提供应用生命周期管理、
+// 中间件初始化和服务启动。App 按常驻进程设计，不以完整关闭中间件连接为目标。
 //
 // Shark 是一个一站式后端微服务框架，统一封装了 MySQL、Redis、Kafka、
 // Elasticsearch、MongoDB、RabbitMQ、MinIO、etcd、RisingWave 等常用中间件的
@@ -62,11 +62,15 @@ import (
 
 // App 是 Shark 框架的核心结构体，聚合了所有中间件客户端和服务组件。
 //
+// App 按常驻进程设计：进程生命周期与服务一致，不以「可完整关闭再退出」为目标。
+// Hunt 收到信号后只 cancel context、短暂等待、关闭日志 Writer；
+// 不关闭 HTTP/gRPC 监听，也不逐个 Close DB/Redis/Kafka 等连接。
+//
 // App 负责：
 //   - 管理应用的生命周期（context、WaitGroup、取消信号）
 //   - 统一初始化所有中间件连接（数据库、缓存、消息队列等）
-//   - 提供 HTTP/gRPC 服务的启动和优雅关闭
-//   - 内建 pprof 性能分析和健康检查端点
+//   - 提供 HTTP/gRPC 服务的启动
+//   - 内建 pprof 与进程存活探测（/health，只表示 App 还活着）
 //
 // 字段分类:
 //   - 生命周期: Wg（等待所有 goroutine 退出）、Sg（防缓存击穿）、Context（全局上下文）
@@ -151,7 +155,7 @@ type App struct {
 //  12. 初始化定时器（依赖 Redis）
 //  13. 初始化 gRPC 服务（依赖 Redis）
 //  14. 初始化 HTTP 服务（基于 Gin）
-//  15. 按需启动 pprof、健康检查服务
+//  15. 按需启动 pprof、存活探测（/health）
 //
 // 参数:
 //   - options: 应用配置，由 NewOption 或 NewOptionWithRedis 创建
@@ -289,8 +293,8 @@ func New(options *Options) (*App, error) {
 	}
 
 	// ---- RabbitMQ 初始化 ----
-	// 使用服务名称的 CRC16 哈希值来选择连接的 broker 节点，
-	// 实现多节点间的负载均衡分布
+	// 使用服务名称的 CRC16 哈希值来选择连接的 broker 节点。
+	// New 会阻塞到首次连接成功：启动阶段连不上就卡住，起来也没用。
 	if options.rabbitmq != nil {
 		app.Logger.Info("正在连接rabbitmq", zap.Strings("host", options.rabbitmq.Host), zap.String("user", options.rabbitmq.User))
 		mq, err := sharkrabbitmq.New(app.Context, app.Logger, app.Wg, options.rabbitmq, app.Name, app.Id)
@@ -357,10 +361,10 @@ func New(options *Options) (*App, error) {
 	// ---- 定时器初始化（依赖 Redis） ----
 	if options.timer {
 		if app.RedisCluster != nil {
-			app.Timer = sharktimer.NewTimer(app.Context, app.Project, app.Name, app.Id, app.RedisCluster)
+			app.Timer = sharktimer.NewTimer(app.Context, app.Project, app.Name, app.Id, app.RedisCluster, app.Logger)
 			app.Logger.Info("初始化timer成功")
 		} else if app.RedisClient != nil {
-			app.Timer = sharktimer.NewTimer(app.Context, app.Project, app.Name, app.Id, app.RedisClient)
+			app.Timer = sharktimer.NewTimer(app.Context, app.Project, app.Name, app.Id, app.RedisClient, app.Logger)
 			app.Logger.Info("初始化timer成功")
 		} else {
 			app.Logger.Error("初始化timer失败, 依赖redis, 请确保已正确配置redis连接")
@@ -382,7 +386,7 @@ func New(options *Options) (*App, error) {
 			app.Logger.Error("开启rpc服务失败, 依赖redis, 请确保已正确配置redis连接")
 		}
 	} else {
-		// 端口 <= 0：初始化 gRPC 但不启动监听（仅做服务发现注册）
+		// 端口 <= 0：初始化 gRPC 客户端（从 Redis 读其他服务地址，本进程不监听）
 		if app.RedisCluster != nil {
 			server := sharkgrpc.New(app.Context, app.Project, app.RedisCluster, app.Logger, -1)
 			app.Grpc = server
@@ -416,11 +420,8 @@ func New(options *Options) (*App, error) {
 
 // pprof 启动 Go 性能分析 HTTP 服务。
 //
-// 提供标准的 Go pprof 端点：
-//   - /debug/pprof/ — 索引页
-//   - /debug/pprof/goroutine — goroutine 堆栈
-//   - /debug/pprof/heap — 堆内存分析
-//   - /debug/pprof/profile — CPU 分析（默认 30s）
+// 注册 /debug/pprof/（pprof.Index）。Index 会转发 heap/goroutine 等 runtime profile。
+// CPU profile（/debug/pprof/profile）和 trace 未单独注册。
 //
 // 参数:
 //   - port: 监听端口
@@ -435,23 +436,24 @@ func (a *App) pprof(port int) {
 	}
 }
 
-// health_service 启动健康检查 HTTP 服务。
+// health_service 启动进程存活探测 HTTP 服务。
 //
-// 提供 /health 端点，返回 {"status": "ok"}，
-// 用于 Kubernetes 的 liveness/readiness probe 或负载均衡器的健康检测。
+// 只表示本进程 HTTP 端口还能接受请求，不检查 DB/Redis 等中间件。
+// 用于 Kubernetes liveness（探 App 是否存活），不要当成 readiness/依赖探活。
 //
 // 参数:
 //   - port: 监听端口
 func (a *App) health_service(port int) {
-	http.HandleFunc("/health", func(writer http.ResponseWriter, request *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(200)
 		writer.Write([]byte(`{"status": "ok"}`))
 	})
-	a.Logger.Info("开启健康检查服务", zap.Int("port", port))
-	err := http.ListenAndServe(fmt.Sprintf(":%v", port), nil)
+	a.Logger.Info("开启存活探测服务", zap.Int("port", port))
+	err := http.ListenAndServe(fmt.Sprintf(":%v", port), mux)
 	if err != nil {
-		a.Logger.Error("健康检查服务启动失败", zap.Int("port", port), zap.Error(err))
+		a.Logger.Error("存活探测服务启动失败", zap.Int("port", port), zap.Error(err))
 	}
 }
 
@@ -464,16 +466,18 @@ type AppComponent interface {
 	Start()
 }
 
-// Hunt 启动所有组件并进入主循环，等待退出信号后优雅关闭。
+// Hunt 启动业务组件并阻塞直到收到退出信号。
+//
+// App 是常驻进程，Hunt 不是完整的资源回收流程：
+// 不关闭 HTTP/gRPC，不 Close 各中间件连接；Go() 也不登记 WaitGroup。
 //
 // 执行流程:
-//  1. 等待 100ms（确保所有 goroutine 都准备好）
-//  2. 依次启动所有传入的 AppComponent
+//  1. 依次启动所有传入的 AppComponent
+//  2. 若已创建 gRPC Server 则 Run 监听
 //  3. 打印启动 banner
-//  4. 阻塞等待 SIGTERM 或 SIGINT 信号
-//  5. 收到信号后取消 context，等待 500ms 让正在处理的请求完成
-//  6. 等待所有 WaitGroup 中的 goroutine 退出
-//  7. 打印退出日志
+//  4. 阻塞等待 SIGTERM 或 SIGINT
+//  5. cancel context，等待 500ms，Wg.Wait()（仅等待主动登记过的 goroutine）
+//  6. 关闭日志 Kafka Writer
 //
 // 参数:
 //   - components: 需要在启动时初始化的应用组件列表
@@ -515,6 +519,8 @@ func (a *App) banner() {
 }
 
 // Go 安全地启动一个后台 goroutine，自动捕获 panic 并记录日志。
+//
+// App 按常驻进程设计，Go 不登记 WaitGroup（Hunt 不以排空全部后台任务为目标）。
 //
 // 与直接使用 go 关键字不同，此方法会：
 //   - 自动在 defer 中 recover panic，防止单个 goroutine 崩溃导致整个程序退出

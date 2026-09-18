@@ -8,6 +8,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/xcodego/shark/sharktimer"
+	"go.uber.org/zap"
 )
 
 // mockTimerRedis 实现 sharktimer.TimerRedis 接口，用于单元测试。
@@ -87,7 +88,7 @@ func TestNewTimer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	// 立即取消，避免后台轮询线程持续运行
 	cancel()
-	timer := sharktimer.NewTimer(ctx, "test", "unit-timer", "inst-1", mockRedis)
+	timer := sharktimer.NewTimer(ctx, "test", "unit-timer", "inst-1", mockRedis, zap.NewNop())
 	if timer == nil {
 		t.Fatal("NewTimer 不应返回 nil")
 	}
@@ -99,7 +100,7 @@ func TestAddTimer(t *testing.T) {
 	mockRedis := newMockTimerRedis()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	timer := sharktimer.NewTimer(ctx, "test", "unit-timer", "inst-1", mockRedis)
+	timer := sharktimer.NewTimer(ctx, "test", "unit-timer", "inst-1", mockRedis, zap.NewNop())
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -133,7 +134,7 @@ func TestRemoveTimer(t *testing.T) {
 	mockRedis := newMockTimerRedis()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	timer := sharktimer.NewTimer(ctx, "test", "unit-timer", "inst-1", mockRedis)
+	timer := sharktimer.NewTimer(ctx, "test", "unit-timer", "inst-1", mockRedis, zap.NewNop())
 
 	var mu sync.Mutex
 	triggered := false
@@ -163,7 +164,7 @@ func TestAddTimeWithId(t *testing.T) {
 	mockRedis := newMockTimerRedis()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	timer := sharktimer.NewTimer(ctx, "test", "unit-timer", "inst-1", mockRedis)
+	timer := sharktimer.NewTimer(ctx, "test", "unit-timer", "inst-1", mockRedis, zap.NewNop())
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -194,7 +195,7 @@ func TestDefaultCallback(t *testing.T) {
 	mockRedis := newMockTimerRedis()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	timer := sharktimer.NewTimer(ctx, "test", "unit-timer", "inst-1", mockRedis)
+	timer := sharktimer.NewTimer(ctx, "test", "unit-timer", "inst-1", mockRedis, zap.NewNop())
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -231,7 +232,7 @@ func TestRemoveTimerNonExistent(t *testing.T) {
 	mockRedis := newMockTimerRedis()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	timer := sharktimer.NewTimer(ctx, "test", "unit-timer", "inst-1", mockRedis)
+	timer := sharktimer.NewTimer(ctx, "test", "unit-timer", "inst-1", mockRedis, zap.NewNop())
 
 	// 删除不存在的定时器不应 panic
 	timer.RemoveTimer("non-existent-timer-id")

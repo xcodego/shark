@@ -1,3 +1,17 @@
+// Package sharkws 提供挂在 Gin 上的 WebSocket 连接管理。
+//
+// 设计约定（业务必须遵守，框架不做背压丢弃）：
+//
+//	所有连接共用 send_channel / recv_channel（各缓冲 10000）。通道满时发送方会阻塞。
+//	读循环把消息打进 recv_channel；OnConnect / OnMessage / OnClose 在同一条 recv 协程里同步执行。
+//	回调里如果阻塞（慢逻辑、再调 Send 且 send 通道已满），recv 协程卡住 → 通道堆满 →
+//	ReadMessage 循环阻塞，连接像假死。
+//
+//	因此：回调必须尽快返回，重活丢到业务自己的 goroutine；不要在回调里做会堵很久的 Send/Broadcast。
+//
+//	Close() 会直接 Conn.Close()，与 send 协程的 WriteMessage 可能并发。
+//	gorilla 不允许对同一连接并发写/关。业务应避免对同一 conn 边 Close 边 Send；
+//	主动 Close 后不要再对该 id 发送。
 package sharkws
 
 import (
@@ -22,12 +36,12 @@ type SharkWS struct {
 	index                    atomic.Int64
 	router                   *gin.Engine
 	connects                 sync.Map
-	connect_callback         sync.Map                                    // 连接建立回调
-	close_callback           sync.Map                                    // 连接关闭回调,主动关闭,不会触发回调
-	message_callback         sync.Map                                    // 消息回调
-	default_message_callback func(conn int, path string, message []byte) // 默认消息回调
-	send_channel             chan []any
-	recv_channel             chan []any
+	connect_callback         sync.Map     // 连接建立回调
+	close_callback           sync.Map     // 连接关闭回调,主动关闭,不会触发回调
+	message_callback         sync.Map     // 消息回调
+	default_message_callback atomic.Value // func(conn int, path string, message []byte)；与 recv 协程并发安全
+	send_channel             chan []any   // 全局发送队列，满则 Send 阻塞；业务勿在回调里长时间堵这里
+	recv_channel             chan []any   // 全局接收队列，满则读循环阻塞；回调必须快返回
 	looping                  bool
 }
 
@@ -86,8 +100,8 @@ func NewSharkWS(router *gin.Engine) *SharkWS {
 				if ok {
 					callback := v.(func(conn int, message []byte))
 					callback(idx, message)
-				} else if s.default_message_callback != nil {
-					s.default_message_callback(idx, path, message)
+				} else if cb, ok := s.default_message_callback.Load().(func(conn int, path string, message []byte)); ok && cb != nil {
+					cb(idx, path, message)
 				}
 			}
 		}
@@ -126,13 +140,13 @@ func (s *SharkWS) Listen(path string) {
 			Ip:     ip,
 		}
 		s.connects.Store(idx, conn)
-		s.recv_channel <- []any{1, path, idx}
+		s.recv_channel <- []any{1, path, idx} // 通道满会阻塞本连接读循环，回调必须快
 		for {
 			_, message, err := wsconn.ReadMessage()
 			if err != nil {
 				break
 			}
-			s.recv_channel <- []any{3, path, idx, message}
+			s.recv_channel <- []any{3, path, idx, message} // 同上，勿在 OnMessage 里做重活
 		}
 		_, ok := s.connects.Load(idx)
 		if ok {
@@ -152,7 +166,7 @@ func (s *SharkWS) GetConnects() []int {
 }
 
 func (s *SharkWS) OnConnect(path string, callback func(conn int)) {
-	s.connect_callback.Store(path, callback)
+	s.connect_callback.Store(path, callback) // 在 recv 协程同步执行，必须尽快返回
 }
 
 func (s *SharkWS) RemoteIp(conn int) string {
@@ -190,19 +204,23 @@ func (s *SharkWS) Close(conn int) {
 	}
 	s.connects.Delete(conn)
 	connection := c.(*Connection)
+	// 与 send 协程 WriteMessage 可能并发；业务不要边 Close 边 Send。
 	connection.Conn.Close()
 }
 
 func (s *SharkWS) OnClose(path string, callback func(conn int)) {
-	s.close_callback.Store(path, callback)
+	s.close_callback.Store(path, callback) // 被动断开时在 recv 协程执行，必须尽快返回
 }
 
 func (s *SharkWS) OnMessage(path string, callback func(conn int, message []byte)) {
-	s.message_callback.Store(path, callback)
+	s.message_callback.Store(path, callback) // 在 recv 协程同步执行，必须尽快返回
 }
 
 func (s *SharkWS) DefaultMessage(callback func(conn int, path string, message []byte)) {
-	s.default_message_callback = callback
+	if callback == nil {
+		return
+	}
+	s.default_message_callback.Store(callback) // 在 recv 协程同步执行，必须尽快返回
 }
 
 func (s *SharkWS) SendText(conn int, text string) {
@@ -210,7 +228,7 @@ func (s *SharkWS) SendText(conn int, text string) {
 	if !ok {
 		return
 	}
-	s.send_channel <- []any{conn, websocket.TextMessage, []byte(text)}
+	s.send_channel <- []any{conn, websocket.TextMessage, []byte(text)} // 通道满会阻塞调用方
 }
 
 func (s *SharkWS) SendBytes(conn int, data []byte) {
@@ -218,7 +236,7 @@ func (s *SharkWS) SendBytes(conn int, data []byte) {
 	if !ok {
 		return
 	}
-	s.send_channel <- []any{conn, websocket.BinaryMessage, data}
+	s.send_channel <- []any{conn, websocket.BinaryMessage, data} // 通道满会阻塞调用方
 }
 
 func (s *SharkWS) BroadcastText(text string) {

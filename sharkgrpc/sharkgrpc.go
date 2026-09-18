@@ -1,35 +1,34 @@
-// Package sharkgrpc 提供基于 Redis 服务发现的 gRPC 客户端/服务端连接管理。
+// Package sharkgrpc 提供 gRPC 服务端监听，以及基于 Redis 地址列表的客户端连接管理。
 //
 // 核心设计：
-//  1. 服务发现：服务端启动时将地址注册到 Redis，客户端从 Redis 读取目标地址列表
-//  2. 动态地址更新：每个连接后台协程每 5 秒检查 Redis 中地址列表的变化，无缝切换
-//  3. 连接复用：通过 singleflight 合并并发请求，避免重复创建同一服务的连接
-//  4. 全局连接池：使用 sync.Map 存储所有已建立的 gRPC 连接，按服务名索引
-//  5. 负载均衡：客户端使用 round_robin 策略在多个服务端实例间分配请求
-//  6. 重试机制：内置重试策略（最多 3 次，指数退避），处理 UNAVAILABLE 和 RESOURCE_EXHAUSTED
+//  1. 服务端只负责本机端口监听。进程不知道外部如何连到自己（公网 IP / VIP / K8s Service），
+//     因此不向 Redis 注册自身地址，服务发现不依赖自注册。
+//  2. Redis 中的地址列表由知道可达地址的外部系统写入（key：{project}:grpc:{serviceName}，value 为 JSON 数组）
+//  3. 客户端从 Redis 读取目标地址；后台协程每 5 秒检查列表变化并更新 resolver
+//  4. 连接复用：通过 singleflight 合并并发请求，避免重复创建同一服务的连接
+//  5. 全局连接池：使用 sync.Map 存储所有已建立的 gRPC 连接，按服务名索引
+//  6. 负载均衡：客户端使用 round_robin 策略在多个服务端实例间分配请求
+//  7. 重试机制：内置重试策略（最多 3 次，指数退避），处理 UNAVAILABLE 和 RESOURCE_EXHAUSTED
 //
-// 服务发现流程：
-//  1. 服务端启动时将自身地址（host:port）注册到 Redis key：{project}:grpc:{serviceName}
-//  2. Redis value 为 JSON 数组，如：["10.0.0.1:50051","10.0.0.2:50051"]
-//  3. 客户端 GetRpcConnection 时读取 Redis 获取初始地址列表
-//  4. 后台协程 updateResolver 每 5 秒轮询 Redis，检测地址变化并更新解析器
-//  5. gRPC 内置的 round_robin 负载均衡器自动在选择新地址
+// 客户端发现流程：
+//  1. Redis key：{project}:grpc:{serviceName}，value 如 ["10.0.0.1:50051","10.0.0.2:50051"]
+//  2. GetRpcConnection 读取 Redis。key 不存在或值为空时写入 "[]" 占位（初始化配置，nil 写成空数组），
+//     避免后续请求反复查询空 key；外部写入真实地址后即可被轮询到。这不是服务端自注册。
+//  3. 后台协程 updateResolver 每 5 秒轮询 Redis，检测地址变化并更新解析器
+//  4. gRPC 内置的 round_robin 负载均衡器自动选择地址
 //
 // 典型使用场景：
 //   - 微服务间 gRPC 调用（如 A 服务调用 B 服务的 gRPC 接口）
-//   - 滚动更新时客户端自动发现新实例并摘除旧实例
-//   - 多实例部署时自动负载均衡
+//   - 地址列表变更时客户端自动切换实例
+//   - 多实例部署时 round_robin 负载均衡
 //
 // 使用示例（服务端）：
 //
-//	// 创建 RPC 服务端
+//	// 创建 RPC 服务端（只监听，不注册自身地址）
 //	rpcServer := sharkgrpc.New(ctx, "myproject", rdb, logger, 50051)
 //
 //	// 注册 gRPC 服务
 //	pb.RegisterMyServiceServer(rpcServer.Server, &myServiceImpl{})
-//
-//	// 将本机地址注册到 Redis（由业务方自行实现）
-//	// rdb.Set(ctx, "myproject:grpc:my-service", `["10.0.0.1:50051"]`, 0)
 //
 // 使用示例（客户端）：
 //
@@ -106,7 +105,7 @@ type connection struct {
 //   - Server: gRPC 服务端实例（port > 0 时创建）
 //   - logger: zap 日志记录器
 //   - redis:  Redis 接口，用于服务发现（读写地址列表）
-//   - port:   服务端监听端口（0 表示仅作为客户端）
+//   - port:   服务端监听端口（>0 启动监听；<=0 仅作客户端，sharkapp 在未开 grpc 端口时传 -1）
 //   - sg:     singleflight 组，用于合并并发的 GetRpcConnection 请求
 //   - project: 项目名，用作 Redis key 前缀
 //
@@ -116,7 +115,7 @@ type RpcServer struct {
 	Server  *grpc.Server       // gRPC 服务端实例，通过此字段注册 protobuf 服务
 	logger  *zap.Logger        // zap 日志记录器
 	redis   RpcRedis           // Redis 接口，用于服务发现
-	port    int                // 服务端监听端口（0 表示仅作为客户端）
+	port    int                // 服务端监听端口（>0 监听；<=0 仅客户端）
 	sg      singleflight.Group // 合并并发请求，避免重复创建同一服务的连接
 	project string             // 项目名，用作 Redis key 前缀
 }
@@ -128,11 +127,11 @@ type RpcServer struct {
 //   - project: 项目名，用于构造 Redis key 前缀（如 "myproject:grpc:service-name"）
 //   - redis:   Redis 接口（可为 nil，此时仅可作服务端使用，GetRpcConnection 会失败）
 //   - logger:  zap 日志记录器（可为 nil）
-//   - port:    服务端监听端口（0 表示仅作为客户端，不启动 gRPC Server）
+//   - port:    服务端监听端口（>0 创建 grpc.Server；<=0 仅作客户端，不创建 Server）
 //
 // 行为：
-//   - 当 port > 0 时，自动创建 grpc.Server 并启动监听（1 秒延迟启动）
-//   - 当 port == 0 时，仅作为客户端使用（Server 字段为 nil）
+//   - 当 port > 0 时，创建 grpc.Server；真正 Listen 在 Run() 里立刻启动（无延迟）
+//   - 当 port <= 0 时，仅作为客户端使用（Server 字段为 nil）
 //
 // 使用示例：
 //
@@ -163,11 +162,10 @@ func New(ctx context.Context, project string, redis RpcRedis, logger *zap.Logger
 	return s
 }
 
-// run 启动 gRPC 服务端监听。
+// Run 启动 gRPC 服务端监听。
 //
-// 延迟 1 秒启动以确保其他初始化完成。
-// 在指定的端口上创建 TCP 监听，并启动 gRPC Server。
-// serve 失败时记录错误日志（调用方需通过其他手段感知服务不可用）。
+// port <= 0 时直接返回。否则在指定端口 Listen 并 Serve，无额外延迟。
+// Listen/Serve 失败时记日志后返回（不 panic）。
 func (s *RpcServer) Run() {
 	if s.port <= 0 {
 		return
@@ -175,10 +173,13 @@ func (s *RpcServer) Run() {
 	go func() {
 		listener, err := net.Listen("tcp", fmt.Sprintf(":%v", s.port))
 		if err != nil {
-			s.logger.Error("failed to listen", zap.Error(err))
+			if s.logger != nil {
+				s.logger.Error("failed to listen", zap.Error(err))
+			}
+			return
 		}
 		err = s.Server.Serve(listener)
-		if err != nil {
+		if err != nil && s.logger != nil {
 			s.logger.Error("failed to serve", zap.Error(err))
 		}
 	}()
@@ -334,7 +335,9 @@ func (s *RpcServer) GetRpcConnection(name string) (*grpc.ClientConn, error) {
 			}
 			addr = strings.TrimSpace(addr)
 			if addr == "" {
-				// 地址为空：写入空数组占位，避免后续请求反复查询
+				// 初始化配置：key 不存在或值为空时写入 "[]" 占位（nil 写成空数组）。
+				// 服务端不自注册、也不知道自身可达地址；此处只是占位，避免反复查询空 key。
+				// 外部写入真实地址列表后，updateResolver 即可读到。
 				s.redis.Set(s.ctx, s.redisGrpcHost(name), "[]", 0)
 				return nil, fmt.Errorf("grpc地址未配置")
 			}

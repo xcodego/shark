@@ -1,7 +1,9 @@
 package test
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/xcodego/shark/sharkerror"
@@ -57,9 +59,31 @@ func TestErrorWithData(t *testing.T) {
 
 func TestErrorWithErr(t *testing.T) {
 	orig := errors.New("connection timeout")
-	e := sharkerror.New(20001, "数据库错误").WithErr(orig)
-	if e.Data != "connection timeout" {
-		t.Errorf("Data = %s, want connection timeout", e.Data)
+	base := sharkerror.New(20001, "数据库错误").WithData("keep")
+	e := base.WithErr(orig)
+	if e.Data != "keep" {
+		t.Errorf("WithErr 不应改 Data, got %v", e.Data)
+	}
+	if !errors.Is(e, orig) {
+		t.Error("WithErr 应能 errors.Is 到底层错误")
+	}
+	b, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "connection timeout") {
+		t.Errorf("JSON 不应包含底层错误: %s", b)
+	}
+}
+
+func TestErrorWithErrNil(t *testing.T) {
+	base := sharkerror.New(20001, "数据库错误").WithData("keep")
+	got := base.WithErr(nil)
+	if got != base {
+		t.Error("WithErr(nil) 应返回原实例")
+	}
+	if got.Data != "keep" {
+		t.Errorf("WithErr(nil) 不应改 Data, got %v", got.Data)
 	}
 }
 
@@ -81,10 +105,44 @@ func TestErrorIsNil(t *testing.T) {
 	}
 }
 
-func TestErrorJsonSerialization(t *testing.T) {
-	e := sharkerror.New(10001, "用户不存在").WithData(map[string]any{"user_id": 123})
-	// 验证结构体字段可导出
-	if e.Code != 10001 || e.Msg != "用户不存在" {
-		t.Error("字段不匹配")
+func TestErrorWithErrWrapUnwrap(t *testing.T) {
+	orig := &fakeMySQLError{Number: 1062, Message: "Duplicate entry"}
+	base := sharkerror.New(20001, "数据库错误")
+	e := base.WithData(map[string]any{"table": "users"}).WithErrWrap(orig)
+
+	if e.Data == nil {
+		t.Fatal("WithErrWrap 不应覆盖 Data")
+	}
+	if !errors.Is(e, base) {
+		t.Error("errors.Is 应按 Code 命中业务错误")
+	}
+	var got *fakeMySQLError
+	if !errors.As(e, &got) {
+		t.Fatal("errors.As 应穿透到底层错误")
+	}
+	if got.Number != 1062 {
+		t.Errorf("Number = %d", got.Number)
+	}
+	e2 := e.WithMsg("重复键")
+	if !errors.As(e2, &got) {
+		t.Error("WithMsg 应保留 cause")
+	}
+}
+
+type fakeMySQLError struct {
+	Number  uint16
+	Message string
+}
+
+func (e *fakeMySQLError) Error() string { return e.Message }
+
+func TestErrorWithErrWrapJSONOmitsCause(t *testing.T) {
+	e := sharkerror.New(20001, "数据库错误").WithErrWrap(errors.New("secret"))
+	b, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "secret") {
+		t.Errorf("JSON 不应包含底层错误: %s", b)
 	}
 }

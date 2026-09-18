@@ -76,6 +76,9 @@ type publishMsg struct {
 // 使用服务名称的 CRC16 哈希值取模选择 broker 节点，
 // 确保同一服务始终连接到同一个 broker（冷热均衡）。
 //
+// 启动阶段会阻塞直到首次连接成功：连不上就一直重试，不返回 error。
+// 配了 RabbitMQ 却连不上，进程起来也没有意义，必须卡住引起重视。
+//
 // 使用示例:
 //
 //	client, err := sharkrabbitmq.New(ctx, logger, wg, &sharkrabbitmq.Config{
@@ -83,9 +86,6 @@ type publishMsg struct {
 //	    User:     "guest",
 //	    Password: "guest",
 //	}, "my-service", "1")
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
 //
 // 参数:
 //   - ctx: 上下文，用于控制客户端生命周期
@@ -96,8 +96,8 @@ type publishMsg struct {
 //   - id: 实例 ID（用于消费者标识）
 //
 // 返回:
-//   - *Client: RabbitMQ 客户端实例
-//   - error: 连接失败时返回错误
+//   - *Client: 首次连接成功后的客户端
+//   - error: 首次连接成功后恒为 nil（连不上会阻塞重试，不会以 error 返回）
 func New(ctx context.Context, logger *zap.Logger, wg *sync.WaitGroup, config *Config, name string, id string) (*Client, error) {
 	// 使用 CRC16 哈希选择 broker 节点，同一服务固定连接到同一节点
 	index := crc16.Checksum([]byte(name), crc16.IBMTable)
@@ -112,7 +112,7 @@ func New(ctx context.Context, logger *zap.Logger, wg *sync.WaitGroup, config *Co
 	}
 	// 初始化发布缓冲区（容量 100000 条消息）
 	client.publish = make(chan publishMsg, 100000)
-	// 等待首次连接成功
+	// 阻塞直到首次连接成功。启动阶段连不上则一直重试：配了 MQ 却连不上，起来也没用。
 	innerwg := &sync.WaitGroup{}
 	innerwg.Add(1)
 	go client.connect(int(index), innerwg)

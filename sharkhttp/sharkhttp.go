@@ -61,7 +61,7 @@ func New(ctx context.Context, evn string, logger *zap.Logger, port int) *gin.Eng
 	// 注册内置中间件（按顺序执行）
 	router.Use(recoveryMiddleware(logger)) // 1. panic 恢复
 	router.Use(corsMiddleware())           // 2. CORS 跨域
-	router.Use(errorMiddleware())          // 3. 统一错误处理
+	router.Use(errorMiddleware(logger))    // 3. 统一错误处理
 
 	// 开发环境注册 Swagger 文档路由
 	// 访问地址: http://localhost:PORT/swagger/index.html
@@ -72,7 +72,9 @@ func New(ctx context.Context, evn string, logger *zap.Logger, port int) *gin.Eng
 	// 异步启动 HTTP 服务（不阻塞当前 goroutine）
 	go func() {
 		if err := router.Run(":" + fmt.Sprint(port)); err != nil {
-			logger.Error("http服务启动失败", zap.Error(err), zap.Int("port", port))
+			if logger != nil {
+				logger.Error("http服务启动失败", zap.Error(err), zap.Int("port", port))
+			}
 		}
 	}()
 	return router

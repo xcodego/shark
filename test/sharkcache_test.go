@@ -74,16 +74,33 @@ func TestCacheGetMultiSeeker(t *testing.T) {
 	}
 }
 
-func TestCacheGetErrorSkip(t *testing.T) {
+func TestCacheGetSeekerError(t *testing.T) {
+	redisErr := errors.New("redis connection failed")
 	var dbCalled atomic.Bool
 	cache := sharkcache.New(
-		// seeker 0: 返回错误（如 Redis 连不上）
 		func(args ...any) (*testItem, error) {
-			return nil, errors.New("redis connection failed")
+			return nil, redisErr
 		},
-		// seeker 1: 回退到数据库
 		func(args ...any) (*testItem, error) {
 			dbCalled.Store(true)
+			return &testItem{ID: args[0].(int64), Name: "from-db"}, nil
+		},
+	)
+	_, err := cache.Get(int64(1))
+	if !errors.Is(err, redisErr) {
+		t.Errorf("err = %v, want redisErr", err)
+	}
+	if dbCalled.Load() {
+		t.Error("存储错误不应回退到下一层 seeker")
+	}
+}
+
+func TestCacheGetErrNotFoundFallback(t *testing.T) {
+	cache := sharkcache.New(
+		func(args ...any) (*testItem, error) {
+			return nil, sharkcache.ErrNotFound
+		},
+		func(args ...any) (*testItem, error) {
 			return &testItem{ID: args[0].(int64), Name: "from-db"}, nil
 		},
 	)
@@ -91,22 +108,19 @@ func TestCacheGetErrorSkip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get error: %v", err)
 	}
-	if !dbCalled.Load() {
-		t.Error("seeker 0 出错后应回退到 seeker 1")
-	}
 	if result.Name != "from-db" {
 		t.Errorf("Name = %s, want from-db", result.Name)
 	}
 }
 
-func TestCacheGetAllSeekersFail(t *testing.T) {
+func TestCacheGetAllSeekersMiss(t *testing.T) {
 	cache := sharkcache.New(
-		func(args ...any) (*testItem, error) { return nil, errors.New("err1") },
-		func(args ...any) (*testItem, error) { return nil, errors.New("err2") },
+		func(args ...any) (*testItem, error) { return nil, nil },
+		func(args ...any) (*testItem, error) { return nil, sharkcache.ErrNotFound },
 	)
 	_, err := cache.Get(int64(1))
 	if !errors.Is(err, sharkcache.ErrNotFound) {
-		t.Errorf("所有 seeker 失败应返回 ErrNotFound, got: %v", err)
+		t.Errorf("全部未命中应返回 ErrNotFound, got: %v", err)
 	}
 }
 

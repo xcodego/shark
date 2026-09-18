@@ -1,12 +1,13 @@
 // Package sharktimer 提供基于 Redis ZSet 的轻量级单机定时器。
 //
 // 设计特点：
-//  1. 单机部署，不依赖分布式协调
+//  1. 单机部署，不依赖分布式协调（同一 project+name+id 视为同一实例的 ZSet）
 //  2. 基于 Redis ZSet 存储定时任务（score = 到期时间戳毫秒数，member = 定时器 ID）
-//  3. 定时器误差约 ±1 秒（轮询间隔为 1 秒）
-//  4. 不重试：到期触发后立即从 Redis 中删除，不会重复执行
-//  5. 回调函数通过 ants 协程池异步执行，避免阻塞定时检查线程
-//  6. 使用 Snowflake 算法生成唯一定时器 ID，支持高并发创建
+//  3. Redis key 格式：{project}:timer:{name}-{id}（name 必须进入 key，避免同项目不同服务抢同一把 ZSet）
+//  4. 定时器误差约 ±1 秒（轮询间隔为 1 秒）
+//  5. 回调在 ZRem 成功之后才执行。ZRem 失败会打日志并重试直到成功，避免漏删导致下一轮重复触发
+//  6. 回调函数通过 ants 协程池异步执行，避免阻塞定时检查线程
+//  7. 使用 Snowflake 算法生成唯一定时器 ID，支持高并发创建
 //
 // 典型使用场景：
 //   - 订单超时取消（30 分钟后取消未支付订单）
@@ -16,9 +17,8 @@
 //
 // 工作流程：
 //  1. 业务方调用 AddTimer 向 Redis ZSet 添加一个定时任务
-//  2. 后台轮询线程每秒扫描已到期的任务（score <= 当前时间戳）
-//  3. 到期任务从 Redis 删除，通过 ants 协程池异步执行回调
-//  4. 若任务在触发前被 RemoveTimer 删除，则不会执行
+//  2. 后台轮询扫描已到期任务，ZRem 成功后才执行回调（ZRem 失败打日志并重试直到成功）
+//  3. 若任务在触发前被 RemoveTimer 删除，则不会执行
 package sharktimer
 
 import (
@@ -32,6 +32,7 @@ import (
 	"github.com/panjf2000/ants/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cast"
+	"go.uber.org/zap"
 )
 
 // TimerRedis 定义了定时器所需的 Redis 操作接口。
@@ -63,10 +64,11 @@ type TimerRedis interface {
 type Timer struct {
 	ctx             context.Context           // 上下文，用于控制定时器生命周期（通过 ctx.Done() 优雅退出）
 	timerCallback   sync.Map                  // 定时器 ID → 回调函数的映射（内存存储，进程重启丢失）
-	timerKey        string                    // Redis ZSet 的 key，格式：{project}:timer:{project}-{id}
+	timerKey        string                    // Redis ZSet 的 key，格式：{project}:timer:{name}-{id}
 	snowFlake       *sharksnowflake.Snowflake // Snowflake 实例，用于生成唯一定时器 ID
 	pool            *ants.Pool                // 协程池，用于异步执行回调函数，避免阻塞轮询线程
 	redis           TimerRedis                // Redis 接口，用于读写定时任务
+	logger          *zap.Logger               // 由 NewTimer 传入；为 nil 时 Redis 错误不打日志
 	defaultCallback func(timerId string)      // 默认回调，当定时器触发但未找到对应回调时执行
 }
 
@@ -74,32 +76,32 @@ type Timer struct {
 //
 // 参数：
 //   - ctx: 上下文，用于优雅停止定时器（ctx 取消后轮询线程退出）
-//   - project: 项目名，用于构造 Redis key 前缀（建议使用服务名）
-//   - name: 定时器名称（未在 key 中使用，保留字段）
-//   - id: 定时器实例标识，用于构造 Redis key（同一项目多个定时器实例需用不同 id 区分）
+//   - project: 项目名，用作 Redis key 前缀
+//   - name: 服务名，写入 Redis key，避免同项目下不同服务共用一把 ZSet
+//   - id: 实例标识，同一服务多实例用不同 id 区分
 //   - redis: Redis 客户端接口（如 go-redis 的 *redis.Client）
+//   - logger: zap 日志记录器（可为 nil）
 //
 // 使用示例：
 //
-//	// 创建一个定时器实例
-//	ctx, cancel := context.WithCancel(context.Background())
-//	defer cancel()
-//
-//	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-//	timer := sharktimer.NewTimer(ctx, "myproject", "order-timer", "instance-1", rdb)
+//	timer := sharktimer.NewTimer(ctx, "myproject", "order-timer", "instance-1", rdb, logger)
 //
 //	// 30 分钟后取消订单
 //	timer.AddTimer(30*time.Minute, func() {
 //	    fmt.Println("订单超时，执行取消逻辑")
 //	    // orderService.Cancel(orderId)
 //	})
-func NewTimer(ctx context.Context, project string, name string, id string, redis TimerRedis) *Timer {
-	pool, _ := ants.NewPool(10)
+func NewTimer(ctx context.Context, project string, name string, id string, redis TimerRedis, logger *zap.Logger) *Timer {
+	pool, err := ants.NewPool(10)
+	if err != nil {
+		panic(fmt.Sprintf("sharktimer ants.NewPool: %v", err))
+	}
 	t := &Timer{
 		ctx:           ctx,
 		redis:         redis,
+		logger:        logger,
 		timerCallback: sync.Map{},
-		timerKey:      fmt.Sprintf("%v:timer:%v-%v", project, project, id),
+		timerKey:      fmt.Sprintf("%v:timer:%v-%v", project, name, id),
 		snowFlake:     sharksnowflake.NewSnowflake(),
 		pool:          pool,
 	}
@@ -107,11 +109,18 @@ func NewTimer(ctx context.Context, project string, name string, id string, redis
 	return t
 }
 
+func (t *Timer) logError(msg string, err error) {
+	if t.logger == nil {
+		return
+	}
+	t.logger.Error(msg, zap.String("key", t.timerKey), zap.Error(err))
+}
+
 // processTimer 是后台轮询线程的核心函数。
 //
 // 工作流程：
 //  1. 每秒执行一次轮询，从 Redis ZSet 中查询已到期的定时任务
-//  2. 从 Redis 中批量删除已到期的任务（防止重复触发）
+//  2. ZRem 删除已到期任务；失败则打日志并重试直到成功（成功前不执行回调）
 //  3. 在 sync.Map 中查找对应的回调函数
 //  4. 通过 ants 协程池异步执行回调（panic 会被 recover 捕获，不会导致轮询线程崩溃）
 //  5. 若未找到回调函数，则调用 DefaultCallback（如果已设置）
@@ -125,7 +134,9 @@ func (t *Timer) processTimer() {
 	safeCallback := func(cb func()) {
 		defer func() {
 			if r := recover(); r != nil {
-				// 回调函数应该保证不抛出异常,这里吞掉异常,避免定时器线程崩溃
+				if t.logger != nil {
+					t.logger.Error("sharktimer callback panic", zap.Any("panic", r), zap.String("key", t.timerKey))
+				}
 			}
 		}()
 		cb()
@@ -137,26 +148,42 @@ func (t *Timer) processTimer() {
 			t.pool.Release()
 			return
 		default:
-			// 查询 Redis ZSet 中 score 在 [0, now] 范围内的任务（即已到期的任务）
-			// 每次最多取 100 条，避免单次处理过多
-			result := t.redis.ZRangeByScoreWithScores(t.ctx, t.timerKey, &redis.ZRangeBy{
-				Min:    "0",                                       // 最小分数（0 = 1970-01-01）
-				Max:    fmt.Sprintf("%v", time.Now().UnixMilli()), // 最大分数 = 当前时间毫秒数
+			cmd := t.redis.ZRangeByScoreWithScores(t.ctx, t.timerKey, &redis.ZRangeBy{
+				Min:    "0",
+				Max:    fmt.Sprintf("%v", time.Now().UnixMilli()),
 				Offset: 0,
-				Count:  100, // 每次最多处理 100 个到期任务
-			}).Val()
-			if len(result) == 0 {
-				// 无到期任务，等待 1 秒后继续轮询
+				Count:  100,
+			})
+			result, err := cmd.Result()
+			if err != nil {
+				if t.ctx.Err() != nil {
+					t.pool.Release()
+					return
+				}
+				t.logError("sharktimer ZRange failed", err)
 				time.Sleep(time.Second)
 				continue
 			}
-			// 收集所有到期任务的 member（定时器 ID），用于批量删除
+			if len(result) == 0 {
+				time.Sleep(time.Second)
+				continue
+			}
 			members := make([]interface{}, 0, len(result))
 			for _, v := range result {
 				members = append(members, v.Member)
 			}
-			// 从 Redis ZSet 中批量移除已到期任务（防止下次重复触发）
-			t.redis.ZRem(t.ctx, t.timerKey, members...)
+			for {
+				if t.ctx.Err() != nil {
+					t.pool.Release()
+					return
+				}
+				if err := t.redis.ZRem(t.ctx, t.timerKey, members...).Err(); err != nil {
+					t.logError("sharktimer ZRem failed, retry", err)
+					time.Sleep(time.Second)
+					continue
+				}
+				break
+			}
 			// 遍历每个到期任务，查找并执行回调
 			for _, v := range result {
 				// 从 sync.Map 中取出并删除回调函数
@@ -164,18 +191,22 @@ func (t *Timer) processTimer() {
 				if ok {
 					// 找到了回调函数：通过协程池异步执行
 					if callback, ok := cb.(func()); ok {
-						t.pool.Submit(func() {
+						if err := t.pool.Submit(func() {
 							safeCallback(callback)
-						})
+						}); err != nil {
+							t.logError("sharktimer pool.Submit failed", err)
+						}
 					}
 				} else {
 					// 未找到回调函数：执行默认回调（如果已设置）
 					if t.defaultCallback != nil {
-						t.pool.Submit(func() {
+						if err := t.pool.Submit(func() {
 							safeCallback(func() {
 								t.defaultCallback(cast.ToString(v.Member))
 							})
-						})
+						}); err != nil {
+							t.logError("sharktimer pool.Submit failed", err)
+						}
 					}
 				}
 			}
@@ -194,7 +225,7 @@ func (t *Timer) processTimer() {
 //
 // 使用示例：
 //
-//	timer := sharksnowflake.NewTimer(ctx, "myproject", "order-timer", "inst-1", rdb)
+//	timer := sharktimer.NewTimer(ctx, "myproject", "order-timer", "inst-1", rdb, logger)
 //
 //	// 30 分钟后取消指定订单
 //	timerId := timer.AddTimer(30*time.Minute, func() {

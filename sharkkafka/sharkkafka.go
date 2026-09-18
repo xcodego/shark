@@ -5,7 +5,7 @@
 //  2. Writer 池化：按 topic 缓存 Writer 实例，避免重复创建，支持线程安全读写
 //  3. 批量生产者：内置批量发送优化（BatchSize=10000, BatchBytes=2MB, BatchTimeout=1s）
 //  4. 批量消费者：内置批量拉取 + 管道缓冲 + 自动提交 offset，支持优雅退出
-//  5. 容错设计：生产者使用 RequireOne 确认（性能优先），消费者提交失败重试 5 次
+//  5. 容错设计：生产者使用 RequireOne 确认（性能优先）；消费者 offset 提交失败会一直重试直到成功或 ctx 取消
 //  6. 安全认证：支持 SASL/SCRAM-SHA512 认证 + TLS 加密
 //
 // 使用场景：
@@ -385,7 +385,10 @@ func (s *SharkKafka) Close() error {
 // Reader 配置（默认值）：
 //   - MinBytes:    1（只要有数据就立即返回）
 //   - MaxBytes:    10MB（单次拉取最多 10MB）
-//   - StartOffset: FirstOffset（从最早的消息开始）
+//   - StartOffset: FirstOffset（新消费者组从 topic 最早消息开始，会重放历史）
+//
+// 若不需要重放：不要用默认 FirstOffset。应另外创建 consumer，例如指定 LastOffset，
+// 或使用已经提交过 offset 的 group。
 //
 // 使用示例：
 //
@@ -405,7 +408,7 @@ func (s *SharkKafka) Close() error {
 type ReaderConfig struct {
 	MinBytes    *int   // 单次拉取的最小字节数（低延迟）默认 1
 	MaxBytes    *int   // 单次拉取的最大字节数（高吞吐）默认 10MB
-	StartOffset *int64 // 消费起始偏移量（FirstOffset / LastOffset / 指定偏移量）
+	StartOffset *int64 // 默认 FirstOffset：新 group 重放历史；不需要重放须另建 consumer（LastOffset 或已有 offset 的 group）
 }
 
 func (s *SharkKafka) Reader(topic string, group string, cfg *ReaderConfig) *kafka.Reader {
@@ -413,7 +416,7 @@ func (s *SharkKafka) Reader(topic string, group string, cfg *ReaderConfig) *kafk
 		cfg = &ReaderConfig{
 			MinBytes:    sharkfunc.Pointer(1),                 // 有数据就返回（低延迟）
 			MaxBytes:    sharkfunc.Pointer(10 * 1024 * 1024),  // 单次最多返回 10MB
-			StartOffset: sharkfunc.Pointer(kafka.FirstOffset), // 从最早的消息开始消费
+			StartOffset: sharkfunc.Pointer(kafka.FirstOffset), // 新 group 从最早消息开始（会重放）；不重放须另建 consumer
 		}
 	}
 	if cfg.MinBytes == nil {
@@ -432,7 +435,7 @@ func (s *SharkKafka) Reader(topic string, group string, cfg *ReaderConfig) *kafk
 		MinBytes:          *cfg.MinBytes, // 有数据就返回（低延迟）
 		MaxBytes:          *cfg.MaxBytes, // 单次最多返回 10MB
 		Dialer:            s.dialer,
-		StartOffset:       *cfg.StartOffset, // 从最早的消息开始消费
+		StartOffset:       *cfg.StartOffset, // 未指定时默认 FirstOffset
 		SessionTimeout:    time.Minute,      // 超过这个时间没有收到 Consumer 的 heartbeat，Coordinator 认为 Consumer 死了，然后触发 Rebalance。
 		RebalanceTimeout:  time.Minute,      // Consumer 加入 group 后，参与 rebalance 的最大等待时间。
 		QueueCapacity:     10000,            // 内部缓冲队列容量，避免短时间内拉取过多消息导致内存占用过高
@@ -443,17 +446,20 @@ func (s *SharkKafka) Reader(topic string, group string, cfg *ReaderConfig) *kafk
 
 // BatchConsumer 启动批量消费者，自动拉取、缓冲、提交 offset。
 //
+// 默认 StartOffset=FirstOffset：新 group 从最早消息消费（重放历史）。
+// 若不需要重放，应另外创建 consumer（指定 LastOffset，或使用已经提交过 offset 的 group）。
+//
 // 工作流程：
 //  1. 创建 Reader 并启动拉取协程，将消息推入带缓冲的 channel
 //  2. 消费协程每批最多拉取 10000 条消息，调用 handler 处理
 //  3. handler 返回 true → 提交 offset 并继续；返回 false / panic → 停止消费
-//  4. offset 提交失败自动重试 5 次（每次超时 1 秒）
+//  4. offset 提交失败会一直重试（每次超时 1 秒），直到成功或 ctx 取消
 //
 // 停止条件：
 //   - handler 返回 false
 //   - handler 内部 panic（捕获后停止）
-//   - ctx 被取消（优雅退出）
-//   - offset 提交连续失败 5 次
+//   - ctx 被取消
+//   - offset 提交在 ctx 取消前始终失败（循环上限极大，实际等价于一直重试）
 //
 // 参数：
 //   - topic:   要消费的 topic 名称
@@ -499,7 +505,7 @@ func (s *SharkKafka) BatchConsumer(topic string, group string, cfg *BatchConfig,
 			ReaderConfig: ReaderConfig{
 				MinBytes:    sharkfunc.Pointer(1),                 // 有数据就返回（低延迟）
 				MaxBytes:    sharkfunc.Pointer(10 * 1024 * 1024),  // 单次最多返回 10MB
-				StartOffset: sharkfunc.Pointer(kafka.FirstOffset), // 从最早的消息开始消费
+				StartOffset: sharkfunc.Pointer(kafka.FirstOffset), // 新 group 从最早消息开始（会重放）；不重放须另建 consumer
 			},
 			BatchSize: sharkfunc.Pointer(10000),            // 每批处理的最大消息数，默认  10000
 			Timeout:   sharkfunc.Pointer(time.Duration(0)), // 批次处理超时时间，默认 0 立即返回

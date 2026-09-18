@@ -1,7 +1,9 @@
 package sharkhttp
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"runtime/debug"
 
@@ -33,11 +35,11 @@ var WsUpgrader = websocket.Upgrader{
 //
 // 对于 OPTIONS 预检请求，直接返回 204 No Content。
 //
-// 使用示例:
+// 由 sharkhttp.New 自动注册，未导出。
 //
-//	// 通常由 sharkhttp.New 自动注册，也可以手动注册
-//	router := gin.New()
-//	router.Use(sharkhttp.CorsMiddleware())
+// 使用示例（业务只需走 sharkhttp.New，不必自己挂中间件）:
+//
+//	router := sharkhttp.New(ctx, "dev", logger, 8080)
 //
 // 返回:
 //   - gin.HandlerFunc: CORS 中间件处理函数
@@ -52,9 +54,10 @@ func corsMiddleware() gin.HandlerFunc {
 		ctx.Header("Access-Control-Expose-Headers", "Content-Length, Access-Control-Allow-Origin, Access-Control-Allow-Headers, Content-Type")
 		ctx.Header("Access-Control-Max-Age", "7200")
 
-		// OPTIONS 预检请求直接返回，不继续处理
+		// OPTIONS 预检请求直接返回，不继续进入后续中间件和业务 handler
 		if method == "OPTIONS" {
 			ctx.AbortWithStatus(http.StatusNoContent)
+			return
 		}
 		ctx.Next()
 	}
@@ -65,32 +68,21 @@ func corsMiddleware() gin.HandlerFunc {
 // 功能:
 //   - 捕获处理请求过程中发生的 panic，防止整个进程崩溃
 //   - 记录 panic 信息、调用栈、请求路径和请求体到日志
-//   - 返回 HTTP 500 状态码和 panic 内容
-//
-// 注意事项:
-//   - 会在中间件执行前读取请求体（GetRawData 会消耗 Body），
-//     读取后重新放回 Body 以便后续中间件/Handler 也能读取
+//   - 对客户端返回 HTTP 500 和固定文案，不回传 panic 内容
 //
 // 参数:
 //   - logger: zap 日志记录器，为 nil 时不记录日志
 //
-// 使用示例:
-//
-//	// 通常由 sharkhttp.New 自动注册，也可以手动注册
-//	router := gin.New()
-//	router.Use(sharkhttp.RecoveryMiddleware(logger))
-//
-// 返回:
-//   - gin.HandlerFunc: panic 恢复中间件处理函数
+// 由 sharkhttp.New 自动注册，未导出。
 func recoveryMiddleware(logger *zap.Logger) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		reqPath := ctx.Request.URL.Path
+		// handler 会消耗 Body；必须先拷贝再塞回去，panic 时才能记到原始请求体。
+		reqData, _ := ctx.GetRawData()
+		ctx.Request.Body = io.NopCloser(bytes.NewReader(reqData))
 
 		defer func() {
 			if r := recover(); r != nil {
-				// 仅在 panic 时读取请求体（避免正常请求的额外开销）
-				reqData, _ := ctx.GetRawData()
-				// 记录详细的 panic 信息
 				if logger != nil {
 					logger.Error("panic",
 						zap.Any("error", r),
@@ -99,8 +91,10 @@ func recoveryMiddleware(logger *zap.Logger) gin.HandlerFunc {
 						zap.ByteString("data", reqData),
 					)
 				}
-				// 返回 500 状态码和 panic 信息
-				ctx.JSON(http.StatusInternalServerError, map[string]any{"data": r})
+				ctx.JSON(http.StatusInternalServerError, &sharkerror.Error{
+					Code: 1,
+					Msg:  "内部错误",
+				})
 				ctx.Abort()
 			}
 		}()
@@ -111,21 +105,20 @@ func recoveryMiddleware(logger *zap.Logger) gin.HandlerFunc {
 // errorMiddleware 是统一错误处理中间件。
 //
 // 在请求处理完成后（c.Next() 之后）检查是否有错误：
-//   - 如果错误是 *sharkerror.Error 类型，则以 HTTP 200 + JSON 格式返回业务错误
-//   - 如果是其他类型的错误，包装为 sharkerror.Error{Code: 1, Msg: "未知错误"} 返回
+//   - 如果错误是 *sharkerror.Error 类型，则以 HTTP 200 + JSON 返回 code/msg/Data（WithData）；
+//     WithErr / WithErrWrap 的底层错误只打日志，不进响应
+//   - 如果是其他类型的错误，打日志，对客户端返回固定的 sharkerror.Error{Code: 1, Msg: "未知错误"}，不回传底层错误文本
 //
 // 设计理念:
 //
 //	业务错误不应该使用 HTTP 错误状态码，而应该通过 JSON body 中的 code 字段区分。
 //	这样前端可以统一处理响应，不需要解析 HTTP 状态码。
 //
+// 由 sharkhttp.New 自动注册，未导出。
+//
 // 使用示例:
 //
-//	// 通常由 sharkhttp.New 自动注册，也可以手动注册
-//	router := gin.New()
-//	router.Use(sharkhttp.ErrorMiddleware())
-//
-//	// 在 Handler 中使用
+//	router := sharkhttp.New(ctx, "dev", logger, 8080)
 //	router.GET("/api/user/:id", func(c *gin.Context) {
 //	    user, err := findUser(c.Param("id"))
 //	    if err != nil {
@@ -138,31 +131,44 @@ func recoveryMiddleware(logger *zap.Logger) gin.HandlerFunc {
 //
 // 返回:
 //   - gin.HandlerFunc: 错误处理中间件
-func errorMiddleware() gin.HandlerFunc {
+func errorMiddleware(logger *zap.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Next()
 
-		// 没有错误则直接返回
 		if len(c.Errors) == 0 {
 			return
 		}
 
-		// 获取最后一个错误
 		var err error = c.Errors.Last().Err
 
-		// 判断是否为业务错误（*sharkerror.Error）
 		var e *sharkerror.Error
 		if errors.As(err, &e) {
-			// 业务错误：200 + JSON
-			c.JSON(http.StatusOK, e)
+			if logger != nil && e.Unwrap() != nil {
+				logger.Error("http business error",
+					zap.Error(e.Unwrap()),
+					zap.Int("code", e.Code),
+					zap.String("path", c.Request.URL.Path),
+					zap.String("method", c.Request.Method),
+				)
+			}
+			c.JSON(http.StatusOK, &sharkerror.Error{
+				Code: e.Code,
+				Msg:  e.Msg,
+				Data: e.Data,
+			})
 			return
 		}
 
-		// 未知错误：包装为通用错误格式
+		if logger != nil {
+			logger.Error("http unknown error",
+				zap.Error(err),
+				zap.String("path", c.Request.URL.Path),
+				zap.String("method", c.Request.Method),
+			)
+		}
 		c.JSON(http.StatusOK, &sharkerror.Error{
 			Code: 1,
 			Msg:  "未知错误",
-			Data: err.Error(),
 		})
 	}
 }

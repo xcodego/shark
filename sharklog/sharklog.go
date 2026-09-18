@@ -5,8 +5,8 @@
 //  2. 控制台格式：可读的时间格式 "2006-01-02 15:04:05.000" + 短调用者路径 + 级别缩写
 //  3. Kafka 格式：结构化的 JSON，包含 log_id（Snowflake 唯一ID）、server_name、server_host、msg
 //  4. 延迟初始化：Kafka Writer 通过 SetKafkaWriter 按需注入，未注入时仅控制台输出
-//  5. 优雅退出：检测到 "server exit" 日志时自动关闭 Kafka Writer
-//  6. 容错设计：Kafka 写入失败仅输出到控制台，不阻塞业务日志
+//  5. 关闭：由调用方显式 Close()（Hunt 退出时会关 Kafka Writer），Write 内不会自动关
+//  6. 容错：Kafka 写入失败只 fmt.Println 到控制台；Write 本身同步调用 Writer.WriteMessages（无超时）
 //
 // 日志格式（控制台）：
 //
@@ -58,7 +58,7 @@ import (
 // New 创建一个双通道 SharkLog 日志器实例。
 //
 // 参数：
-//   - ctx:  上下文，用于控制 Kafka Writer 优雅关闭（ctx 取消 + "server exit" 日志触发 Close）
+//   - ctx:  上下文，保留在 Writer 上；Kafka Writer 的关闭靠 Close()，不在 Write 里根据 ctx 自动关
 //   - name: 服务名/项目名，作为 Kafka 消息中 server_name 的前缀
 //   - id:   实例标识，与 name 组合为 "name-id" 格式的完整 server_name
 //
@@ -191,7 +191,7 @@ func (s *SharkLog) Close() {
 //
 // 注意：该结构体未导出，仅供包内 New 函数内部使用。
 type logWriter struct {
-	ctx       context.Context           // 上下文，用于检测优雅退出
+	ctx       context.Context           // 保留 New 传入的 ctx；Write 不根据它自动关 Writer
 	writer    *kafka.Writer             // Kafka Writer 实例（nil 时静默丢弃日志）
 	snowFlake *sharksnowflake.Snowflake // Snowflake 实例，生成 log_id
 	hostName  string                    // 主机名，用于 server_host 字段
@@ -205,8 +205,7 @@ type logWriter struct {
 //  1. 检查 Kafka Writer 是否为 nil，为 nil 时直接返回（仅控制台输出）
 //  2. 构造结构化消息：log_id（Snowflake）+ server_name + server_host + msg
 //  3. 使用 sonic 快速序列化为 JSON
-//  4. 写入 Kafka（非阻塞，失败时输出到控制台 stderr）
-//  5. 检测优雅退出：当 ctx.Done() 关闭 且 日志内容包含 "server exit" 时，关闭 Kafka Writer
+//  4. 写入 Kafka（同步 WriteMessages，使用 context.Background()，无超时）
 //
 // 返回值始终为 len(p), nil（即使 Kafka 写入失败也不返回错误，不影响 zap 的正常流程）。
 //
@@ -214,8 +213,8 @@ type logWriter struct {
 //   - p: zap 编码后的日志字节（JSON 格式，包含 L/T/C/M 字段）
 //
 // 注意：
-//   - Kafka 写入失败时仅通过 fmt.Println 输出到控制台，不返回错误 —— 这是刻意设计，防止 Kafka 故障阻塞业务日志
-//   - ctx.Done() + "server exit" 检测用于实现优雅关闭：服务退出时发送最后一条日志后自动关闭 Writer
+//   - Kafka 写入失败时仅通过 fmt.Println 输出到控制台，不返回错误
+//   - Writer 关闭由 SharkLog.Close() 负责，Write 不会根据 "server exit" 自动 Close
 func (w *logWriter) Write(p []byte) (n int, err error) {
 	if w.writer != nil {
 		// 构造结构化日志消息
@@ -227,7 +226,7 @@ func (w *logWriter) Write(p []byte) (n int, err error) {
 		}
 		// 使用 sonic 进行高性能 JSON 序列化
 		b, _ := sonic.Marshal(data)
-		// 写入 Kafka（5 秒超时，避免 Kafka 不可用时阻塞日志）
+		// 同步写入 Kafka（无超时；失败只打印，仍返回成功给 zap）
 		err := w.writer.WriteMessages(context.Background(), kafka.Message{Value: b})
 		if err != nil {
 			// Kafka 写入失败：降级输出到控制台，不阻塞业务日志

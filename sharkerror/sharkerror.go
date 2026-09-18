@@ -40,10 +40,29 @@ import (
 //   - Code: 业务错误码，用于前端或调用方判断错误类型
 //   - Msg: 错误描述信息，面向用户或开发者的可读文本
 //   - Data: 附加数据，可存放任意类型的上下文信息（如请求参数、调试信息等）
+//   - cause: 底层错误（不进 JSON），供 Unwrap / errors.Is / errors.As 穿透
 type Error struct {
-	Code int    `json:"code"` // 业务错误码
-	Msg  string `json:"msg"`  // 错误描述
-	Data any    `json:"data"` // 附加数据
+	Code  int    `json:"code"` // 业务错误码
+	Msg   string `json:"msg"`  // 错误描述
+	Data  any    `json:"data"` // 附加数据
+	cause error  `json:"-"`    // 底层错误，不序列化
+}
+
+func (e *Error) clone() *Error {
+	return &Error{
+		Code:  e.Code,
+		Msg:   e.Msg,
+		Data:  e.Data,
+		cause: e.cause,
+	}
+}
+
+// Unwrap 返回 WithErr / WithErrWrap 保存的底层错误，供 errors.Is / errors.As 沿链穿透。
+func (e *Error) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
 }
 
 // Error 实现 error 接口，返回 "code=xxx msg=xxx" 格式的错误字符串。
@@ -85,46 +104,35 @@ func (e *Error) Is(target error) bool {
 //	err := ErrUserNotFound.WithData(map[string]any{"user_id": 123})
 //	// Code=10001, Msg="用户不存在", Data={"user_id": 123}
 func (e *Error) WithData(data any) *Error {
-	return &Error{
-		Code: e.Code,
-		Msg:  e.Msg,
-		Data: data,
-	}
+	n := e.clone()
+	n.Data = data
+	return n
 }
 
-// WithErr 创建新的 Error 实例并将原始错误的文本存入 Data 字段。
+// WithErr 创建新的 Error 实例，把原始错误存入未导出的 cause（不进 JSON，不改 Data）。
 //
-// 适用于包装底层错误（如数据库查询错误）并透传给上层。
+// 底层错误给日志 / errors.Is / errors.As 用；给前端看的文案用 Msg，附加字段用 WithData。
 //
 // 参数:
-//   - err: 原始错误，其 Error() 文本会被存入 Data
-//
-// 返回:
-//   - Data 为原始错误文本的 Error 副本
+//   - err: 原始错误；为 nil 时返回原实例
 //
 // 示例:
 //
 //	dbErr := errors.New("connection timeout")
 //	bizErr := ErrDBError.WithErr(dbErr)
-//	// Code=20001, Msg="数据库错误", Data="connection timeout"
+//	// JSON: {"code":20001,"msg":"数据库错误","data":null}
 func (e *Error) WithErr(err error) *Error {
-	return &Error{
-		Code: e.Code,
-		Msg:  e.Msg,
-		Data: err.Error(),
+	if err == nil {
+		return e
 	}
+	n := e.clone()
+	n.cause = err
+	return n
 }
 
-// WithErrWrap 创建新的 Error 实例，保留原始错误类型用于 errors.Is/As 穿透。
+// WithErrWrap 与 WithErr 相同：把原始错误存入 cause，不改 Data、不进 JSON。
 //
-// 与 WithErr 的区别：WithErrWrap 将原始 error 作为 Data 存储，
-// 上游可通过 errors.Is/As 继续判断底层错误类型。
-//
-// 参数:
-//   - err: 原始错误，完整的 error 实例存入 Data（JSON 序列化时自动调用 Error()）
-//
-// 返回:
-//   - Data 为原始 error 的错误副本，errors.Is/As 可穿透
+// 保留此方法是为了兼容已有调用。新代码用 WithErr 即可。
 //
 // 示例:
 //
@@ -133,11 +141,9 @@ func (e *Error) WithErr(err error) *Error {
 //	// errors.Is(bizErr, ErrDBError) → true
 //	// var mysqlErr *mysql.MySQLError; errors.As(bizErr, &mysqlErr) → true
 func (e *Error) WithErrWrap(err error) *Error {
-	return &Error{
-		Code: e.Code,
-		Msg:  e.Msg,
-		Data: err,
-	}
+	n := e.clone()
+	n.cause = err
+	return n
 }
 
 // WithMsg 创建新的 Error 实例并替换消息内容。
@@ -154,11 +160,9 @@ func (e *Error) WithErrWrap(err error) *Error {
 //
 //	err := ErrParamInvalid.WithMsg("用户名不能为空")
 func (e *Error) WithMsg(msg string) *Error {
-	return &Error{
-		Code: e.Code,
-		Msg:  msg,
-		Data: e.Data,
-	}
+	n := e.clone()
+	n.Msg = msg
+	return n
 }
 
 // New 创建一个新的业务错误。

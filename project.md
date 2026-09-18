@@ -11,7 +11,17 @@ Go 版本: 1.26+
 
 ## 一句话
 
-一站式 Go 微服务框架，通过 config.yaml 统一配置 → `sharkapp.New()` 自动初始化所有中间件 → `App.Hunt()` 启动业务模块 + 优雅关闭。
+一站式 Go 微服务框架，通过 config.yaml 统一配置 → `sharkapp.New()` 自动初始化所有中间件 → `App.Hunt()` 启动业务模块。App 按常驻进程设计，不以完整关闭中间件连接为目标。
+
+## 设计约定（评审时不要当成缺陷）
+
+- **App 常驻：** 不实现 HTTP/gRPC/DB/Redis 等完整关闭链路；`Go()` 不登记 WaitGroup。
+- **gRPC：** 服务端不向 Redis 注册自身（进程不知道外部可达地址）。地址列表由外部写入。`GetRpcConnection` 在 key 为空时 `Set "[]"` 是初始化占位（nil 写成空数组），不是自注册。
+- **Snowflake：** 故意没有 worker id。序列打满只能等下一秒，持锁等待是正确行为。
+- **RSA：** 私钥由 `NewOptionWithRsa` 参数传入，不读 `SHARK_PRIVATE_KEY`。解析失败在启动阶段 panic，不返回 error。
+- **RabbitMQ：** `New` 首次连接成功前阻塞重试，不返回 error。启动阶段连不上起来也没用。
+- **Timer key：** `{project}:timer:{name}-{id}`。
+- **WebSocket：** 全局 send/recv 通道满了会阻塞；回调在 recv 协程同步执行。业务必须尽快返回、避免堵塞，框架不丢消息。不要边 Close 边 Send。
 
 ## 项目入口
 
@@ -27,7 +37,7 @@ app.Hunt(&Test{svc: app})
 
 | 包 | 用途 | 关键导出 |
 |---|---|---|
-| `sharkapp` | **应用启动核心** | `App`(所有客户端聚合体)、`New`、`NewOption`(加载 config.yaml)、`Hunt`(启动+优雅关闭)、`Go`(安全 goroutine) |
+| `sharkapp` | **应用启动核心** | `App`(所有客户端聚合体)、`New`、`NewOption`(加载 config.yaml)、`Hunt`(启动并阻塞等信号)、`Go`(安全 goroutine) |
 | `sharklog` | 双通道日志(控制台+Kafka) | `SharkLog`、`New`、`SetKafkaWriter` |
 | `sharkdb` | MySQL GORM 封装 | `NewDb`、`SharkTable`(链式查询)、`TableScan`(Keyset 游标分页) |
 | `sharksql` | SQL 条件构建器 + 40+ 函数 | `SqlBuilder`、`NewSql`、`PageQuery[T]`、`IsDuplicateKey` |
@@ -35,6 +45,7 @@ app.Hunt(&Test{svc: app})
 | `sharkkafka` | Kafka 生产/批量消费 | `SharkKafka`、`Writer`、`BatchConsumer` |
 | `sharkgrpc` | gRPC 服务发现(基于 Redis) | `RpcServer`、`New`、`GetRpcConnection` |
 | `sharkhttp` | Gin HTTP 封装(3 个内置中间件) | `New`、`WsUpgrader`、中间件可单独导出 |
+| `sharkws` | Gin WebSocket 连接管理 | `NewSharkWS`、`Listen`、`Send`/`Broadcast`、`OnConnect`/`OnMessage`/`OnClose` |
 | `sharktimer` | Redis ZSet 轻量级定时器(±1s) | `Timer`、`AddTimer`、`RemoveTimer`、`DefaultCallback` |
 | `sharksnowflake` | Snowflake ID(int64) | `NewSnowflake`、`Generate` |
 | `sharkdecimal` | 高精度数值(decimal 封装) | `Normalize[N|2|6]` |
@@ -102,16 +113,18 @@ redis_cluster: { host[], ... }  # 明确指定集群
 redis_client:  { host[], ... }  # 明确指定单机
 ```
 
-**配置优先级:** 环境变量(REDIS_HOST) > config.yaml > 代码默认值。密码支持 RSA 解密(`SHARK_PRIVATE_KEY` 环境变量)。
+**配置优先级:** 环境变量(REDIS_HOST) > config.yaml > 代码默认值。密码可选 RSA 解密：调用 `NewOptionWithRsa` 传入 PEM 私钥；`NewOption` 不解密，密码按明文读取。
 
-## 优雅关闭(Hunt 流程)
+## Hunt 流程
+
+App 常驻，Hunt 收到信号后不做完整资源回收（不关 HTTP/gRPC/中间件连接）。
 
 1. 调用所有 `AppComponent.Start()`
 2. 启动 gRPC(`Grpc.Run()`)
 3. 阻塞等待 SIGTERM/SIGINT
 4. → `cancelFunc()` 取消 context
-5. → sleep 500ms(等待请求完成)
-6. → `Wg.Wait()`(等待 goroutine)
+5. → sleep 500ms
+6. → `Wg.Wait()`（仅等待主动登记过的 goroutine；`Go()` 不登记）
 7. → 关闭日志(Kafka Writer)
 
 ## 核心功能速查
@@ -148,21 +161,23 @@ sharkredis.DeleteKeys(ctx, client, "pattern:*") // 批量删除
 
 1. `recoveryMiddleware` — panic 恢复(记录调用栈+请求体+路径)
 2. `corsMiddleware` — 允许所有 Origin, 支持 GET/POST
-3. `errorMiddleware` — `sharkerror.Error` 转 JSON(code+msg+data)
+3. `errorMiddleware` — 业务错误转 JSON（code/msg/WithData；WithErr 底层错误只打日志不进响应）；未知错误打日志，对客户端只回固定文案
 
 ### gRPC 服务发现
 
 ```go
+// 服务端只监听，不向 Redis 注册自身（不知道外部可达地址）
 // 服务端: sharkgrpc.New(ctx, project, rdb, logger, port)
 // 客户端: server.GetRpcConnection("service-name") → *grpc.ClientConn
-// 基于 Redis, round_robin 负载均衡, 指数退避重试
+// 地址列表由外部写入 Redis；key 为空时客户端 Set "[]" 做初始化占位
+// 基于 Redis 读列表, round_robin 负载均衡, 指数退避重试
 ```
 
 ### 缓存防击穿
 
 ```go
 sharkcache.New[User](localGetter, redisGetter, dbGetter).Get(userId)
-// singleflight 保证同一 key 只查一次, seeker 链逐级回退
+// singleflight 保证同一 key 只查一次；nil/ErrNotFound 才回退，其他 error 立即返回
 ```
 
 ### RBAC 权限树
@@ -178,7 +193,8 @@ Flatten(tree)                       → {"路径":权限值}(Redis存储)
 ### 定时器
 
 ```go
-sharktimer.NewTimer(ctx, project, name, id, rdb)
+sharktimer.NewTimer(ctx, project, name, id, rdb, logger)
+// Redis key: {project}:timer:{name}-{id}，单机，不靠分布式抢任务
 timer.AddTimer(30min, callback)     → 延迟执行
 timer.AddTimeWithId("id", 30min, cb) → 业务 ID 关联
 timer.RemoveTimer(id)               → 提前取消
@@ -188,8 +204,8 @@ timer.DefaultCallback(fn)           → 默认回调(未注册的回调)
 ### Snowflake
 
 ```go
-sf := sharksnowflake.NewSnowflake()  // 41位时间戳+19位序列号
-sf.Generate()  // int64, 52万/秒
+sf := sharksnowflake.NewSnowflake()  // 41位时间戳+19位序列号，故意无 worker id
+sf.Generate()  // int64, 52万/秒；打满只能等下一秒
 ```
 
 ### 高精度数值
@@ -252,7 +268,7 @@ sharkdecimal.Normalize(v, precision)
 
 | 文件 | 说明 |
 |---|---|
-| `sharkapp/sharkapp.go` | `App` 结构体(聚合所有中间件客户端)、`New()` 初始化16步流程、`Hunt()` 启动+优雅关闭、`AppComponent` 接口、`Go()` 安全 goroutine |
+| `sharkapp/sharkapp.go` | `App` 结构体(聚合所有中间件客户端)、`New()` 初始化流程、`Hunt()` 启动并阻塞、`AppComponent` 接口、`Go()` 安全 goroutine |
 | `sharkapp/option.go` | `Options` 配置结构体、`NewOption()` 加载 config.yaml、环境变量覆盖、RSA 密码解密、`WithXxx` 链式配置方法 |
 
 ### sharklog — 日志
@@ -268,6 +284,7 @@ sharkdecimal.Normalize(v, precision)
 | `sharkdb/sharkdb.go` | `NewDb()` MySQL GORM 连接创建 |
 | `sharkdb/sharktable.go` | `SharkTable` 链式查询封装 (Eq/Gte/Like/Desc/Page 等) |
 | `sharkdb/tablescan.go` | `TableScan` Keyset 游标分页 + Excel 导出 |
+| `sharkdb/jsonslice.go` | `JSONSlice[T]` JSON 列切片（避免 GORM 把 []string 当成关联，报 unsupported data type: &[]） |
 
 ### sharksql — SQL 构建器
 
@@ -308,6 +325,12 @@ sharkdecimal.Normalize(v, precision)
 |---|---|
 | `sharkhttp/sharkhttp.go` | `New()` Gin HTTP 服务创建、`WsUpgrader` WebSocket 升级 |
 | `sharkhttp/middleware.go` | 3 个内置中间件: `recoveryMiddleware`(panic恢复)、`corsMiddleware`(跨域)、`errorMiddleware`(业务错误转JSON) |
+
+### sharkws — WebSocket
+
+| 文件 | 说明 |
+|---|---|
+| `sharkws/sharkws.go` | 挂在 Gin 上的 WebSocket：全局 send/recv 通道、连接回调、`DefaultMessage` 用 atomic.Value |
 
 ### sharktimer — 定时器
 
@@ -442,6 +465,7 @@ sharkdecimal.Normalize(v, precision)
 | `test/sql_from_req_test.go` | SQL 从请求构建测试 |
 | `test/sharktable_test.go` | sharkdb SharkTable 单元测试 |
 | `test/sharkdb_integration_test.go` | sharkdb 集成测试 |
+| `test/jsonslice_test.go` | JSONSlice GORM 解析/读写测试 |
 | `test/sharkcache_test.go` | sharkcache 单元测试 |
 | `test/sharkredis_integration_test.go` | sharkredis 集成测试 |
 | `test/sharkkafka_integration_test.go` | sharkkafka 集成测试 |

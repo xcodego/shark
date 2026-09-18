@@ -310,13 +310,16 @@ func NewOption(project string, name string) (*Options, error) {
 // 配置加载流程:
 //  1. 创建 viper 实例，读取当前目录或 ./config 目录下的 config.yaml
 //  2. 同时支持环境变量覆盖（环境变量中 . 替换为 _，如 redis.host → REDIS_HOST）
-//  3. 自动从环境变量 SHARK_PRIVATE_KEY 读取 RSA 私钥
-//  4. 按照统一的 key 格式解析各中间件的连接信息，解析时对密码字段自动解密
+//  3. rsa 非空时解析 PEM 私钥，用于解密配置中的密码字段；为空则密码按明文使用。
+//     私钥只来自本函数参数，不读取 SHARK_PRIVATE_KEY 或其它环境变量。
+//     解析失败在启动阶段直接 panic（返回 error 容易被忽略，必须立刻引起重视）。
+//  4. 按照统一的 key 格式解析各中间件的连接信息
 //  5. 仅当 host 列表非空时才创建对应的 Config 实例
 //
 // 参数:
 //   - project: 项目名称
 //   - name:    服务名称
+//   - rsa:     PEM 格式 RSA 私钥（PKCS1/PKCS8），空字符串表示不解密密码
 //
 // 返回值:
 //   - *Options: 配置对象
@@ -365,6 +368,7 @@ func NewOptionWithRsa(project string, name string, rsa string) (*Options, error)
 		key := strings.TrimSpace(rsa)
 		k, err := parseRSAPrivateKey(key)
 		if err != nil {
+			// 启动阶段私钥无效必须立刻暴露：返回 error 容易被忽略，panic 才能引起重视。
 			panic(fmt.Errorf("parse RSA private key failed: %w", err))
 		}
 		opts.rsaPrivateKey = k

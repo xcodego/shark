@@ -18,10 +18,11 @@ var ErrTypeAssertion = errors.New("sharkcache: type assertion failed")
 //   - 多个 goroutine 同时请求同一个 key 时，只有一个会真正执行查询，
 //     其他 goroutine 会等待并共享同一个结果。
 //
-// 它通过 seeker 链实现多级缓存回退（如：本地缓存 → Redis → DB）：
-//   - seeker[0] 先查询一级缓存，命中则返回；
-//   - 未命中则 seeker[1] 查询二级缓存，命中则返回；
-//   - 依此类推，所有 seeker 都未命中则返回 ErrNotFound。
+// 它通过 seeker 链实现多级查询（如：本地缓存 → Redis → DB）：
+//   - seeker 返回非空值且无 error：命中，立即返回；
+//   - seeker 返回 nil 且 error 为 nil 或 ErrNotFound：未命中，尝试下一层；
+//   - seeker 返回其他 error：视为存储故障，立即返回该错误，不再回退；
+//   - 所有 seeker 都未命中：返回 ErrNotFound。
 //
 // 使用示例：
 //
@@ -73,8 +74,9 @@ func New[T any](seekers ...func(args ...any) (*T, error)) *Cache[T] {
 // 执行流程：
 //  1. 将 args 序列化后 MD5 生成 key，用于 singleflight 去重。
 //  2. 通过 singleflight.Do 确保同一 key 只执行一次查询。
-//  3. 按顺序遍历 seekers：任一返回非空值即成功返回。
-//  4. 所有 seeker 都失败或返回 nil，则返回 ErrNotFound。
+//  3. 按顺序遍历 seekers：非空值即返回；nil / ErrNotFound 视为未命中并尝试下一层。
+//  4. 任一 seeker 返回非 ErrNotFound 的 error，立即返回该错误（不把存储故障当成未命中）。
+//  5. 全部未命中则返回 ErrNotFound。
 //
 // args 会被 sonic.Marshal 序列化后计算 MD5 作为去重 key，
 // 因此相同参数会自动合并为一次查询。
@@ -96,17 +98,13 @@ func (c *Cache[T]) Get(args ...any) (*T, error) {
 		// 按顺序尝试每个 seeker
 		for _, seeker := range c.seekers {
 			v, err := seeker(args...)
-			if err != nil {
-				// 当前 seeker 出错（如 Redis 连不上），
-				// 继续尝试下一个 seeker（回退到数据库）
-				continue
+			if err != nil && !errors.Is(err, ErrNotFound) {
+				return nil, err
 			}
 			if v != nil {
-				// 命中缓存/数据库，直接返回
 				return v, nil
 			}
 		}
-		// 所有 seeker 都未命中
 		return nil, ErrNotFound
 	})
 	if err != nil {

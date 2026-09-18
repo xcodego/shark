@@ -14,7 +14,7 @@ Shark 封装了微服务开发中常见的中间件和工具库，提供统一�
 
 - **统一的配置管理** — 所有组件通过 `config.yaml` 统一配置，支持 json/yaml/mapstructure 标签 + 环境变量覆盖
 - **双通道日志** — 控制台（Console Encoder）+ Kafka（JSON Encoder），通过 `zapcore.NewTee` 合并，Snowflake 生成每条日志唯一 ID
-- **内置服务发现** — gRPC 基于 Redis 的服务注册与发现，支持动态地址更新、round_robin 负载均衡和指数退避重试
+- **内置服务发现** — gRPC 客户端从 Redis 读取地址列表，支持动态更新、round_robin 负载均衡和指数退避重试
 - **高性能 ID 生成** — 改进型 Snowflake 算法，41位时间戳 + 19位序列号，每秒 52 万个 ID，int64 类型前端安全
 - **SQL 条件构建器** — 流式 API 构建参数化 WHERE/JOIN ON 子句，空值自动跳过，防 SQL 注入，支持 AND/OR 任意嵌套、字段对字段比较
 - **Keyset 游标分页** — 泛型表扫描器，深分页性能不受数据量影响，支持双向翻页（Next/Prev）和 Excel 流式导出
@@ -351,7 +351,7 @@ cache := sharkcache.New[User](
     func(args ...any) (*User, error) { return db.FindUser(args[0].(int64)) },
 )
 
-user, err := cache.Get(userId)  // singleflight 防击穿 + 多级回退
+user, err := cache.Get(userId)  // singleflight 防击穿；未命中才回退，存储错误直接返回
 if errors.Is(err, sharkcache.ErrNotFound) {
     // 所有 seeker 都未命中
 }
@@ -495,7 +495,7 @@ mq.Consume("orders", "order-queue", "created", func(msg amqp.Delivery) {
 ### 定时器 (`sharktimer`)
 
 ```go
-timer := sharktimer.NewTimer(ctx, "myproject", "order-timer", "inst-1", rdb)
+timer := sharktimer.NewTimer(ctx, "myproject", "order-timer", "inst-1", rdb, logger)
 
 // 添加延迟任务
 timerId := timer.AddTimer(30*time.Minute, func() { cancelOrder("12345") })
@@ -627,7 +627,7 @@ original, _ := sharkzip.Decompress(compressed)
                          │
                   ┌──────▼──────┐
                   │  sharkapp   │  ← 加载配置、初始化所有中间件
-                  │   App.Hunt  │  ← 启动业务模块 + 优雅关闭
+                  │   App.Hunt  │  ← 启动业务模块（常驻，不以完整关闭中间件为目标）
                   └──────┬──────┘
                          │
          ┌───────────────┼───────────────┬───────────────┐
