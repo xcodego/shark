@@ -118,7 +118,7 @@ func (s *MyService) Start() {
 | `sharkutils` | 通用工具函数 | `RandNum`, `Md5`, `GetClientIp`, `BcryptHash`, `BcryptCheck` |
 | `sharkverify` | TOTP 两步验证 | `VerifyCode`, `NewSecret`, `GetQrCodeUrl` |
 | `sharkzip` | Zlib 数据压缩 | `Compress`, `Decompress` |
-| `sharkskiplist` | 有序映射（跳表） | `SkipList`, `New`, `NewWithComparator`, `SetOrUpdate`, `SetIfNotExists`, `Get`, `Delete`, `RangeAsc/RangeDesc` |
+| `sharkskiplist` | 有序映射（跳表） | `SkipList`, `NewAsc`, `NewDesc`, `NewWithComparator`, `NewDescWithComparator`, `SetOrUpdate`, `SetIfNotExists`, `Get`, `Delete`, `RangeAsc/RangeDesc` |
 
 ## 核心模块详解
 

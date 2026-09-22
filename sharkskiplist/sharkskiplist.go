@@ -4,18 +4,19 @@
 // O(log n) 的查找、插入和删除，且支持高效的有序遍历与范围查询。
 //
 // 设计特点：
-//  1. 泛型实现：SkipList[K, V] 支持任意 key/value 类型，
-//     默认使用 cmp.Ordered 比较，也支持传入自定义比较器。
-//  2. 并发安全：所有公开方法内部使用 sync.RWMutex 加锁，
-//     多个 goroutine 可以安全地并发读写。
-//  3. 随机层数：p = 1/4，最大层数 32，足够支撑千万级元素。
-//  4. 有序遍历：Range / RangeDesc / RangeBetween 按 key 顺序回调，
+//  1. 泛型实现：SkipList[K, V] 支持任意 key/value 类型，通过自然升序
+//     比较器（cmp.Ordered 或自定义）定义顺序。
+//  2. 原生方向可选：NewAsc 原生升序、NewDesc 原生降序。沿原生方向的
+//     遍历走前向指针（O(1) 额外内存、最快），逆方向则快照反转（O(n) 内存）。
+//  3. 并发安全：所有公开方法内部使用 sync.RWMutex 加锁，多 goroutine 可安全并发读写。
+//  4. 随机层数：p = 1/4，最大层数 32，足够支撑千万级元素。
+//  5. 有序遍历：RangeAsc / RangeDesc / RangeBetween 按 key 顺序回调，
 //     回调返回 false 可提前终止遍历。
 //
 // 典型使用场景：有序排行榜、区间查询、需要按 key 排序的内存缓存等。
 //
 // 注意：Range 系列回调函数在持有读锁期间同步执行，回调内不得再调用
-// 会加锁的方法（如 Set/Delete），否则会造成死锁。
+// 会加锁的方法（如 SetOrUpdate/Delete），否则会造成死锁。
 package sharkskiplist
 
 import (
@@ -54,35 +55,55 @@ type SkipList[K any, V any] struct {
 	mu   sync.RWMutex     // 读写锁，保护并发访问
 	head *node[K, V]      // 头节点，next 长度固定为 maxLevel
 	size int              // 当前元素数量
-	cmp  func(a, b K) int // 比较器：负数表示 a<b，0 表示相等，正数表示 a>b
+	desc bool             // 原生方向：false=升序，true=降序
+	asc  func(a, b K) int // 自然升序比较器，用于 Min/Max/RangeBetween 等语义判断
+	cmp  func(a, b K) int // 物理存储比较器：desc=false 时为 asc，desc=true 时为 reverse(asc)
 }
 
-// New 创建一个使用默认升序比较的跳表。
+// NewAsc 创建一个原生升序的跳表。
 //
-// K 必须是可比较的有序类型（如 int、int64、string、float64 等，
-// 满足 cmp.Ordered 约束），内部使用 cmp.Compare 进行比较。
+// K 必须是可比较的有序类型（满足 cmp.Ordered 约束），内部使用 cmp.Compare
+// 作为自然升序比较器。原生升序下，升序遍历（RangeAsc/KeysAsc/NewAscIter）
+// 与 Min 走"正向"（最快、零快照）。
 //
 // 使用示例：
 //
-//	sl := sharkskiplist.New[int, string]()
+//	sl := sharkskiplist.NewAsc[int, string]()
 //	sl.SetOrUpdate(1, "one")
 //	sl.SetOrUpdate(2, "two")
 //	v, ok := sl.Get(1) // "one", true
-func New[K cmp.Ordered, V any]() *SkipList[K, V] {
-	return NewWithComparator[K, V](cmp.Compare)
+func NewAsc[K cmp.Ordered, V any]() *SkipList[K, V] {
+	return newSkipList[K, V](cmp.Compare, false)
 }
 
-// NewWithComparator 使用自定义比较器创建一个跳表。
+// NewDesc 创建一个原生降序的跳表。
 //
-// compare 用于比较两个 key 的大小：返回负数表示 a < b，0 表示相等，
-// 正数表示 a > b。通过自定义比较器可以实现降序、按结构体某字段排序等
-// 非默认顺序。
+// 与 NewAsc 使用相同的自然升序比较器，但底层按降序存储。原生降序下，
+// 降序遍历（RangeDesc/KeysDesc/NewDescIter）与 Max 走"正向"（最快、零快照），
+// 适合以降序访问为主的场景（如排行榜从高到低）。
+//
+// 注意：所有方法的"升序/降序"语义均指自然升序/降序，与原生方向无关。
+//
+// 使用示例：
+//
+//	sl := sharkskiplist.NewDesc[int, string]()
+//	sl.SetOrUpdate(1, "one")
+//	sl.SetOrUpdate(2, "two")
+//	v, ok := sl.Get(1) // "one", true（Get 语义不变）
+func NewDesc[K cmp.Ordered, V any]() *SkipList[K, V] {
+	return newSkipList[K, V](cmp.Compare, true)
+}
+
+// NewWithComparator 使用自定义比较器创建原生升序的跳表。
+//
+// compare 用于比较两个 key 的自然升序大小：返回负数表示 a < b，0 表示相等，
+// 正数表示 a > b。原生升序下升序遍历最快。
 //
 // compare 为 nil 时会 panic。
 //
 // 使用示例：
 //
-//	// 按字符串长度排序
+//	// 按字符串长度升序
 //	sl := sharkskiplist.NewWithComparator[string, int](
 //	    func(a, b string) int {
 //	        if len(a) < len(b) { return -1 }
@@ -91,13 +112,42 @@ func New[K cmp.Ordered, V any]() *SkipList[K, V] {
 //	    },
 //	)
 func NewWithComparator[K any, V any](compare func(a, b K) int) *SkipList[K, V] {
+	return newSkipList[K, V](compare, false)
+}
+
+// NewDescWithComparator 使用自定义比较器创建原生降序的跳表。
+//
+// compare 语义与 NewWithComparator 相同（自然升序比较），但底层按降序存储，
+// 原生降序下降序遍历最快。
+//
+// compare 为 nil 时会 panic。
+func NewDescWithComparator[K any, V any](compare func(a, b K) int) *SkipList[K, V] {
+	return newSkipList[K, V](compare, true)
+}
+
+// newSkipList 根据自然升序比较器和原生方向构造跳表。
+//
+// desc 为 false 时底层按升序存储（cmp = compare）；desc 为 true 时底层按
+// 降序存储（cmp = reverse(compare)）。compare 为 nil 时会 panic。
+func newSkipList[K any, V any](compare func(a, b K) int, desc bool) *SkipList[K, V] {
 	if compare == nil {
 		panic("sharkskiplist: comparator must not be nil")
 	}
+	cmp := compare
+	if desc {
+		cmp = reverseCompare(compare)
+	}
 	return &SkipList[K, V]{
 		head: &node[K, V]{next: make([]*node[K, V], maxLevel)},
-		cmp:  compare,
+		desc: desc,
+		asc:  compare,
+		cmp:  cmp,
 	}
+}
+
+// reverseCompare 反转比较器方向。
+func reverseCompare[K any](compare func(a, b K) int) func(a, b K) int {
+	return func(a, b K) int { return -compare(a, b) }
 }
 
 // randomLevel 随机生成新节点的层数。
@@ -270,28 +320,15 @@ func (sl *SkipList[K, V]) Clear() {
 	sl.size = 0
 }
 
-// Min 返回 key 最小的元素（首元素）。空跳表时返回 (零值, 零值, false)。
-func (sl *SkipList[K, V]) Min() (K, V, bool) {
-	sl.mu.RLock()
-	defer sl.mu.RUnlock()
-
-	var zeroK K
-	var zeroV V
-	first := sl.head.next[0]
-	if first == nil {
-		return zeroK, zeroV, false
-	}
-	return first.key, first.value, true
+// firstNode 返回物理存储顺序（沿 next）的第一个节点，O(1)。
+// 调用方必须已持有读锁。
+func (sl *SkipList[K, V]) firstNode() *node[K, V] {
+	return sl.head.next[0]
 }
 
-// Max 返回 key 最大的元素（末元素）。空跳表时返回 (零值, 零值, false)。
-func (sl *SkipList[K, V]) Max() (K, V, bool) {
-	sl.mu.RLock()
-	defer sl.mu.RUnlock()
-
-	var zeroK K
-	var zeroV V
-	// 从最高层沿最右侧一路走到底，x 即为最大 key 的节点
+// lastNode 返回物理存储顺序（沿 next）的最后一个节点，O(log n)。
+// 空表返回 nil。调用方必须已持有读锁。
+func (sl *SkipList[K, V]) lastNode() *node[K, V] {
 	x := sl.head
 	for i := maxLevel - 1; i >= 0; i-- {
 		for x.next[i] != nil {
@@ -299,9 +336,47 @@ func (sl *SkipList[K, V]) Max() (K, V, bool) {
 		}
 	}
 	if x == sl.head {
+		return nil
+	}
+	return x
+}
+
+// Min 返回 key 最小的元素。空跳表时返回 (零值, 零值, false)。
+func (sl *SkipList[K, V]) Min() (K, V, bool) {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+
+	var zeroK K
+	var zeroV V
+	var n *node[K, V]
+	if sl.desc {
+		n = sl.lastNode() // 原生降序：自然最小 key 在物理末尾
+	} else {
+		n = sl.firstNode() // 原生升序：自然最小 key 在物理首位
+	}
+	if n == nil {
 		return zeroK, zeroV, false
 	}
-	return x.key, x.value, true
+	return n.key, n.value, true
+}
+
+// Max 返回 key 最大的元素。空跳表时返回 (零值, 零值, false)。
+func (sl *SkipList[K, V]) Max() (K, V, bool) {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+
+	var zeroK K
+	var zeroV V
+	var n *node[K, V]
+	if sl.desc {
+		n = sl.firstNode() // 原生降序：自然最大 key 在物理首位
+	} else {
+		n = sl.lastNode() // 原生升序：自然最大 key 在物理末尾
+	}
+	if n == nil {
+		return zeroK, zeroV, false
+	}
+	return n.key, n.value, true
 }
 
 // Ceiling 返回 key 大于等于给定 key 的最小元素（"下限"）。
@@ -350,10 +425,36 @@ func (sl *SkipList[K, V]) Floor(key K) (K, V, bool) {
 	return prev.key, prev.value, true
 }
 
+// forEachForward 沿物理存储顺序（next）遍历，O(1) 额外内存。
+// 调用方必须已持有读锁。
+func (sl *SkipList[K, V]) forEachForward(fn func(key K, value V) bool) {
+	for x := sl.head.next[0]; x != nil; x = x.next[0] {
+		if !fn(x.key, x.value) {
+			return
+		}
+	}
+}
+
+// forEachBackward 沿物理存储顺序的逆序遍历（快照反转），O(n) 额外内存。
+// 调用方必须已持有读锁。
+func (sl *SkipList[K, V]) forEachBackward(fn func(key K, value V) bool) {
+	keys := make([]K, 0, sl.size)
+	values := make([]V, 0, sl.size)
+	for x := sl.head.next[0]; x != nil; x = x.next[0] {
+		keys = append(keys, x.key)
+		values = append(values, x.value)
+	}
+	for i := len(keys) - 1; i >= 0; i-- {
+		if !fn(keys[i], values[i]) {
+			return
+		}
+	}
+}
+
 // RangeAsc 按 key 升序遍历所有元素，并对每个元素调用 fn。
 //
 // fn 返回 false 可提前终止遍历。遍历过程中持有读锁，回调内不得调用
-// 本实例的写方法（Set/Delete/Clear），否则会死锁。
+// 本实例的写方法（SetOrUpdate/Delete/Clear），否则会死锁。
 //
 // 使用示例：
 //
@@ -365,30 +466,67 @@ func (sl *SkipList[K, V]) RangeAsc(fn func(key K, value V) bool) {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
 
-	for x := sl.head.next[0]; x != nil; x = x.next[0] {
+	if sl.desc {
+		sl.forEachBackward(fn) // 原生降序：自然升序即物理逆序
+		return
+	}
+	sl.forEachForward(fn)
+}
+
+// RangeDesc 按 key 降序遍历所有元素，并对每个元素调用 fn。
+//
+// fn 返回 false 可提前终止遍历。遍历过程中持有读锁，回调内不得调用
+// 本实例的写方法。原生升序时需快照反转（O(n) 额外内存），原生降序时
+// 零快照（O(1) 额外内存）。
+func (sl *SkipList[K, V]) RangeDesc(fn func(key K, value V) bool) {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+
+	if sl.desc {
+		sl.forEachForward(fn) // 原生降序：自然降序即物理正向
+		return
+	}
+	sl.forEachBackward(fn)
+}
+
+// physForward 沿物理存储顺序正向遍历 [lo, hi] 闭区间（要求 lo <= hi 物理）。
+// 调用方必须已持有读锁。
+func (sl *SkipList[K, V]) physForward(lo, hi K, fn func(key K, value V) bool) {
+	// 定位第一个物理 >= lo 的节点
+	x := sl.head
+	for i := maxLevel - 1; i >= 0; i-- {
+		for x.next[i] != nil && sl.cmp(x.next[i].key, lo) < 0 {
+			x = x.next[i]
+		}
+	}
+	for x = x.next[0]; x != nil; x = x.next[0] {
+		if sl.cmp(x.key, hi) > 0 {
+			return
+		}
 		if !fn(x.key, x.value) {
 			return
 		}
 	}
 }
 
-// RangeDesc 按 key 降序遍历所有元素，并对每个元素调用 fn。
-//
-// fn 返回 false 可提前终止遍历。实现上先收集元素快照再倒序回调，
-// 因此相比 Range 需要 O(n) 的额外内存。遍历持有读锁，回调内不得调用
-// 本实例的写方法。
-func (sl *SkipList[K, V]) RangeDesc(fn func(key K, value V) bool) {
-	sl.mu.RLock()
-	keys := make([]K, 0, sl.size)
-	values := make([]V, 0, sl.size)
-	for x := sl.head.next[0]; x != nil; x = x.next[0] {
-		keys = append(keys, x.key)
-		values = append(values, x.value)
+// physBackward 沿物理存储顺序的逆序遍历 [lo, hi] 闭区间（要求 lo <= hi 物理），
+// 即先收集物理区间节点快照再倒序回调。调用方必须已持有读锁。
+func (sl *SkipList[K, V]) physBackward(lo, hi K, fn func(key K, value V) bool) {
+	x := sl.head
+	for i := maxLevel - 1; i >= 0; i-- {
+		for x.next[i] != nil && sl.cmp(x.next[i].key, lo) < 0 {
+			x = x.next[i]
+		}
 	}
-	sl.mu.RUnlock()
-
-	for i := len(keys) - 1; i >= 0; i-- {
-		if !fn(keys[i], values[i]) {
+	nodes := make([]*node[K, V], 0)
+	for x = x.next[0]; x != nil; x = x.next[0] {
+		if sl.cmp(x.key, hi) > 0 {
+			break
+		}
+		nodes = append(nodes, x)
+	}
+	for i := len(nodes) - 1; i >= 0; i-- {
+		if !fn(nodes[i].key, nodes[i].value) {
 			return
 		}
 	}
@@ -396,7 +534,7 @@ func (sl *SkipList[K, V]) RangeDesc(fn func(key K, value V) bool) {
 
 // RangeBetween 遍历 [start, end] 闭区间内的元素，并调用 fn。
 //
-// 遍历方向由端点顺序决定：
+// 遍历方向由端点顺序决定（按自然顺序）：
 //   - start < end：按 key 升序遍历 [start, end]；
 //   - start > end：按 key 降序遍历 [end, start]；
 //   - start == end：仅遍历等于该 key 的元素（若存在）。
@@ -414,59 +552,20 @@ func (sl *SkipList[K, V]) RangeBetween(start, end K, fn func(key K, value V) boo
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
 
-	if sl.cmp(start, end) > 0 {
-		sl.rangeBetweenDesc(start, end, fn)
+	if sl.asc(start, end) > 0 {
+		// start > end：自然降序遍历 [end, start]
+		if sl.desc {
+			sl.physForward(start, end, fn) // 原生降序：自然降序即物理正向
+		} else {
+			sl.physBackward(end, start, fn) // 原生升序：自然降序即物理逆序
+		}
 		return
 	}
-	sl.rangeBetweenAsc(start, end, fn)
-}
-
-// rangeBetweenAsc 按升序遍历 [start, end] 闭区间（要求 start <= end）。
-// 调用方必须已持有读锁。
-func (sl *SkipList[K, V]) rangeBetweenAsc(start, end K, fn func(key K, value V) bool) {
-	// 定位第一个 >= start 的节点
-	x := sl.head
-	for i := maxLevel - 1; i >= 0; i-- {
-		for x.next[i] != nil && sl.cmp(x.next[i].key, start) < 0 {
-			x = x.next[i]
-		}
-	}
-	for x = x.next[0]; x != nil; x = x.next[0] {
-		if sl.cmp(x.key, end) > 0 {
-			return
-		}
-		if !fn(x.key, x.value) {
-			return
-		}
-	}
-}
-
-// rangeBetweenDesc 按降序遍历 [end, start] 闭区间（要求 start > end）。
-// 跳表仅维护前向（升序）指针，故先收集区间内节点的升序快照，再倒序回调。
-// 调用方必须已持有读锁。
-func (sl *SkipList[K, V]) rangeBetweenDesc(start, end K, fn func(key K, value V) bool) {
-	// 定位第一个 >= end（降序区间的下界）的节点
-	x := sl.head
-	for i := maxLevel - 1; i >= 0; i-- {
-		for x.next[i] != nil && sl.cmp(x.next[i].key, end) < 0 {
-			x = x.next[i]
-		}
-	}
-
-	// 收集 [end, start] 区间内的节点（升序）
-	nodes := make([]*node[K, V], 0)
-	for x = x.next[0]; x != nil; x = x.next[0] {
-		if sl.cmp(x.key, start) > 0 {
-			break
-		}
-		nodes = append(nodes, x)
-	}
-
-	// 倒序回调，实现降序遍历
-	for i := len(nodes) - 1; i >= 0; i-- {
-		if !fn(nodes[i].key, nodes[i].value) {
-			return
-		}
+	// start <= end：自然升序遍历 [start, end]
+	if sl.desc {
+		sl.physBackward(end, start, fn) // 原生降序：自然升序即物理逆序
+	} else {
+		sl.physForward(start, end, fn) // 原生升序：自然升序即物理正向
 	}
 }
 
@@ -478,6 +577,9 @@ func (sl *SkipList[K, V]) KeysAsc() []K {
 	keys := make([]K, 0, sl.size)
 	for x := sl.head.next[0]; x != nil; x = x.next[0] {
 		keys = append(keys, x.key)
+	}
+	if sl.desc {
+		slices.Reverse(keys)
 	}
 	return keys
 }
@@ -491,17 +593,19 @@ func (sl *SkipList[K, V]) ValuesAsc() []V {
 	for x := sl.head.next[0]; x != nil; x = x.next[0] {
 		values = append(values, x.value)
 	}
+	if sl.desc {
+		slices.Reverse(values)
+	}
 	return values
 }
 
 // KeysDesc 返回按 key 降序排列的所有 key 的副本。
 //
-// 跳表仅维护前向（升序）指针，因此先按升序收集后再反转。
-// 时间复杂度 O(n)，需要 O(n) 额外内存。
+// 时间复杂度 O(n)，需要 O(n) 额外内存（返回切片的固有成本）。
 //
 // 使用示例：
 //
-//	sl := sharkskiplist.New[int, string]()
+//	sl := sharkskiplist.NewAsc[int, string]()
 //	sl.SetOrUpdate(1, "a"); sl.SetOrUpdate(2, "b"); sl.SetOrUpdate(3, "c")
 //	keys := sl.KeysDesc() // [3, 2, 1]
 func (sl *SkipList[K, V]) KeysDesc() []K {
@@ -512,18 +616,19 @@ func (sl *SkipList[K, V]) KeysDesc() []K {
 	for x := sl.head.next[0]; x != nil; x = x.next[0] {
 		keys = append(keys, x.key)
 	}
-	slices.Reverse(keys)
+	if !sl.desc {
+		slices.Reverse(keys)
+	}
 	return keys
 }
 
 // ValuesDesc 返回按 key 降序排列的所有 value 的副本。
 //
-// 与 KeysDesc 类似，先按升序收集 value 再反转，从而得到与 key 降序
-// 一致的值序列。时间复杂度 O(n)，需要 O(n) 额外内存。
+// 时间复杂度 O(n)，需要 O(n) 额外内存（返回切片的固有成本）。
 //
 // 使用示例：
 //
-//	sl := sharkskiplist.New[int, string]()
+//	sl := sharkskiplist.NewAsc[int, string]()
 //	sl.SetOrUpdate(1, "a"); sl.SetOrUpdate(2, "b"); sl.SetOrUpdate(3, "c")
 //	values := sl.ValuesDesc() // ["c", "b", "a"]
 func (sl *SkipList[K, V]) ValuesDesc() []V {
@@ -534,7 +639,9 @@ func (sl *SkipList[K, V]) ValuesDesc() []V {
 	for x := sl.head.next[0]; x != nil; x = x.next[0] {
 		values = append(values, x.value)
 	}
-	slices.Reverse(values)
+	if !sl.desc {
+		slices.Reverse(values)
+	}
 	return values
 }
 
@@ -545,8 +652,8 @@ func (sl *SkipList[K, V]) ValuesDesc() []V {
 // / Delete / Clear）会被阻塞。使用完毕后务必调用 Close 释放锁，否则会造成
 // 锁泄漏，进而导致后续写操作永久阻塞。
 //
-// 正向迭代通过前向指针逐节点前进，额外内存 O(1)；反向迭代由于跳表仅维护
-// 前向指针，创建时先收集升序节点快照再倒序返回，额外内存 O(n)。
+// 沿原生方向的迭代通过前向指针逐节点前进，额外内存 O(1)；逆原生方向的迭代
+// 由于跳表仅维护前向指针，创建时先收集节点快照再倒序返回，额外内存 O(n)。
 //
 // 推荐用法（defer Close 确保锁被释放）：
 //
@@ -568,10 +675,10 @@ type Iter[K any, V any] struct {
 	closed  bool            // 是否已调用 Close 释放锁
 }
 
-// NewAscIter 创建一个正向迭代器，按 key 升序遍历所有元素。
+// NewAscIter 创建一个升序迭代器，按 key 升序遍历所有元素。
 //
 // 调用后即持有跳表的读锁，必须配合 Close 释放。遍历过程中对跳表的写操作
-// 会被阻塞，因此请尽快完成遍历并 Close。
+// 会被阻塞，因此请尽快完成遍历并 Close。原生降序时需快照（O(n) 内存）。
 //
 // 使用示例：
 //
@@ -582,16 +689,29 @@ type Iter[K any, V any] struct {
 //	}
 func (sl *SkipList[K, V]) NewAscIter() *Iter[K, V] {
 	sl.mu.RLock()
+	if sl.desc {
+		// 原生降序：自然升序即物理逆序，需快照
+		nodes := make([]*node[K, V], 0, sl.size)
+		for x := sl.head.next[0]; x != nil; x = x.next[0] {
+			nodes = append(nodes, x)
+		}
+		return &Iter[K, V]{
+			sl:      sl,
+			nodes:   nodes,
+			idx:     len(nodes) - 1,
+			reverse: true,
+		}
+	}
 	return &Iter[K, V]{
 		sl:  sl,
 		cur: sl.head.next[0],
 	}
 }
 
-// NewDescIter 创建一个反向迭代器，按 key 降序遍历所有元素。
+// NewDescIter 创建一个降序迭代器，按 key 降序遍历所有元素。
 //
-// 与 NewAscIter 一样持有读锁（必须 Close 释放）。由于跳表仅维护前向指针，
-// 创建时会收集全部节点的升序快照（O(n) 内存），再倒序返回。
+// 与 NewAscIter 一样持有读锁（必须 Close 释放）。原生升序时需快照（O(n) 内存），
+// 原生降序时零快照。
 //
 // 使用示例：
 //
@@ -606,6 +726,13 @@ func (sl *SkipList[K, V]) NewAscIter() *Iter[K, V] {
 //	}
 func (sl *SkipList[K, V]) NewDescIter() *Iter[K, V] {
 	sl.mu.RLock()
+	if sl.desc {
+		// 原生降序：自然降序即物理正向
+		return &Iter[K, V]{
+			sl:  sl,
+			cur: sl.head.next[0],
+		}
+	}
 	nodes := make([]*node[K, V], 0, sl.size)
 	for x := sl.head.next[0]; x != nil; x = x.next[0] {
 		nodes = append(nodes, x)

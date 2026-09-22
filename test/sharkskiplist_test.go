@@ -2,6 +2,7 @@ package test
 
 import (
 	"math/rand"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -10,7 +11,7 @@ import (
 )
 
 func TestSkipListSetGet(t *testing.T) {
-	sl := sharkskiplist.New[int, string]()
+	sl := sharkskiplist.NewAsc[int, string]()
 	sl.SetOrUpdate(1, "one")
 	sl.SetOrUpdate(2, "two")
 	sl.SetOrUpdate(3, "three")
@@ -24,7 +25,7 @@ func TestSkipListSetGet(t *testing.T) {
 }
 
 func TestSkipListUpdate(t *testing.T) {
-	sl := sharkskiplist.New[int, string]()
+	sl := sharkskiplist.NewAsc[int, string]()
 	sl.SetOrUpdate(1, "one")
 	sl.SetOrUpdate(1, "uno")
 	if v, _ := sl.Get(1); v != "uno" {
@@ -36,7 +37,7 @@ func TestSkipListUpdate(t *testing.T) {
 }
 
 func TestSkipListSetIfNotExists(t *testing.T) {
-	sl := sharkskiplist.New[int, string]()
+	sl := sharkskiplist.NewAsc[int, string]()
 
 	if !sl.SetIfNotExists(1, "one") {
 		t.Error("首次 SetIfNotExists 应成功")
@@ -64,7 +65,7 @@ func TestSkipListSetIfNotExists(t *testing.T) {
 }
 
 func TestSkipListDelete(t *testing.T) {
-	sl := sharkskiplist.New[int, string]()
+	sl := sharkskiplist.NewAsc[int, string]()
 	sl.SetOrUpdate(1, "one")
 	sl.SetOrUpdate(2, "two")
 	if !sl.Delete(1) {
@@ -85,7 +86,7 @@ func TestSkipListDelete(t *testing.T) {
 }
 
 func TestSkipListContains(t *testing.T) {
-	sl := sharkskiplist.New[int, string]()
+	sl := sharkskiplist.NewAsc[int, string]()
 	sl.SetOrUpdate(10, "ten")
 	if !sl.Contains(10) {
 		t.Error("Contains(10) 应为 true")
@@ -96,7 +97,7 @@ func TestSkipListContains(t *testing.T) {
 }
 
 func TestSkipListRange(t *testing.T) {
-	sl := sharkskiplist.New[int, int]()
+	sl := sharkskiplist.NewAsc[int, int]()
 	for _, k := range []int{5, 1, 4, 2, 3} {
 		sl.SetOrUpdate(k, k*10)
 	}
@@ -118,7 +119,7 @@ func TestSkipListRange(t *testing.T) {
 }
 
 func TestSkipListRangeDesc(t *testing.T) {
-	sl := sharkskiplist.New[int, int]()
+	sl := sharkskiplist.NewAsc[int, int]()
 	for k := 1; k <= 5; k++ {
 		sl.SetOrUpdate(k, k)
 	}
@@ -140,7 +141,7 @@ func TestSkipListRangeDesc(t *testing.T) {
 }
 
 func TestSkipListRangeBetween(t *testing.T) {
-	sl := sharkskiplist.New[int, int]()
+	sl := sharkskiplist.NewAsc[int, int]()
 	for k := 1; k <= 10; k++ {
 		sl.SetOrUpdate(k, k)
 	}
@@ -188,7 +189,7 @@ func TestSkipListRangeBetween(t *testing.T) {
 }
 
 func TestSkipListRangeEarlyStop(t *testing.T) {
-	sl := sharkskiplist.New[int, int]()
+	sl := sharkskiplist.NewAsc[int, int]()
 	for k := 1; k <= 10; k++ {
 		sl.SetOrUpdate(k, k)
 	}
@@ -204,7 +205,7 @@ func TestSkipListRangeEarlyStop(t *testing.T) {
 }
 
 func TestSkipListMinMax(t *testing.T) {
-	sl := sharkskiplist.New[int, string]()
+	sl := sharkskiplist.NewAsc[int, string]()
 	sl.SetOrUpdate(3, "c")
 	sl.SetOrUpdate(1, "a")
 	sl.SetOrUpdate(2, "b")
@@ -218,7 +219,7 @@ func TestSkipListMinMax(t *testing.T) {
 }
 
 func TestSkipListMinMaxEmpty(t *testing.T) {
-	sl := sharkskiplist.New[int, string]()
+	sl := sharkskiplist.NewAsc[int, string]()
 	if _, _, ok := sl.Min(); ok {
 		t.Error("空跳表 Min 应返回 false")
 	}
@@ -228,7 +229,7 @@ func TestSkipListMinMaxEmpty(t *testing.T) {
 }
 
 func TestSkipListCeilingFloor(t *testing.T) {
-	sl := sharkskiplist.New[int, string]()
+	sl := sharkskiplist.NewAsc[int, string]()
 	sl.SetOrUpdate(1, "a")
 	sl.SetOrUpdate(3, "c")
 	sl.SetOrUpdate(5, "e")
@@ -255,7 +256,7 @@ func TestSkipListCeilingFloor(t *testing.T) {
 }
 
 func TestSkipListKeysValues(t *testing.T) {
-	sl := sharkskiplist.New[int, string]()
+	sl := sharkskiplist.NewAsc[int, string]()
 	sl.SetOrUpdate(2, "two")
 	sl.SetOrUpdate(1, "one")
 	sl.SetOrUpdate(3, "three")
@@ -281,7 +282,7 @@ func TestSkipListKeysValues(t *testing.T) {
 }
 
 func TestSkipListKeysValuesDesc(t *testing.T) {
-	sl := sharkskiplist.New[int, string]()
+	sl := sharkskiplist.NewAsc[int, string]()
 	sl.SetOrUpdate(2, "two")
 	sl.SetOrUpdate(1, "one")
 	sl.SetOrUpdate(3, "three")
@@ -306,7 +307,7 @@ func TestSkipListKeysValuesDesc(t *testing.T) {
 	}
 
 	// 空跳表返回空切片（非 nil）
-	empty := sharkskiplist.New[int, string]()
+	empty := sharkskiplist.NewAsc[int, string]()
 	if k := empty.KeysDesc(); len(k) != 0 {
 		t.Errorf("空跳表 KeysDesc 长度 = %d, want 0", len(k))
 	}
@@ -316,7 +317,7 @@ func TestSkipListKeysValuesDesc(t *testing.T) {
 }
 
 func TestSkipListClear(t *testing.T) {
-	sl := sharkskiplist.New[int, int]()
+	sl := sharkskiplist.NewAsc[int, int]()
 	for k := 1; k <= 10; k++ {
 		sl.SetOrUpdate(k, k)
 	}
@@ -374,7 +375,7 @@ func TestSkipListNilComparatorPanic(t *testing.T) {
 
 func TestSkipListLargeScale(t *testing.T) {
 	const n = 100000
-	sl := sharkskiplist.New[int, int]()
+	sl := sharkskiplist.NewAsc[int, int]()
 	perm := rand.Perm(n)
 	for _, k := range perm {
 		sl.SetOrUpdate(k, k*2)
@@ -407,7 +408,7 @@ func TestSkipListLargeScale(t *testing.T) {
 }
 
 func TestSkipListConcurrent(t *testing.T) {
-	sl := sharkskiplist.New[int, int]()
+	sl := sharkskiplist.NewAsc[int, int]()
 	const goroutines = 8
 	const perGoroutine = 2000
 
@@ -435,27 +436,8 @@ func TestSkipListConcurrent(t *testing.T) {
 	}
 }
 
-func BenchmarkSkipListSet(b *testing.B) {
-	sl := sharkskiplist.New[int, int]()
-	b.ResetTimer()
-	for b.Loop() {
-		sl.SetOrUpdate(rand.Intn(1<<20), 1)
-	}
-}
-
-func BenchmarkSkipListGet(b *testing.B) {
-	sl := sharkskiplist.New[int, int]()
-	for i := 0; i < 100000; i++ {
-		sl.SetOrUpdate(i, i)
-	}
-	b.ResetTimer()
-	for b.Loop() {
-		_, _ = sl.Get(rand.Intn(100000))
-	}
-}
-
 func TestSkipListIter(t *testing.T) {
-	sl := sharkskiplist.New[int, int]()
+	sl := sharkskiplist.NewAsc[int, int]()
 	for k := 1; k <= 5; k++ {
 		sl.SetOrUpdate(k, k*10)
 	}
@@ -486,7 +468,7 @@ func TestSkipListIter(t *testing.T) {
 }
 
 func TestSkipListIterDesc(t *testing.T) {
-	sl := sharkskiplist.New[int, int]()
+	sl := sharkskiplist.NewAsc[int, int]()
 	for k := 1; k <= 5; k++ {
 		sl.SetOrUpdate(k, k*10)
 	}
@@ -517,7 +499,7 @@ func TestSkipListIterDesc(t *testing.T) {
 }
 
 func TestSkipListIterCloseIdempotent(t *testing.T) {
-	sl := sharkskiplist.New[int, string]()
+	sl := sharkskiplist.NewAsc[int, string]()
 	sl.SetOrUpdate(1, "one")
 
 	it := sl.NewAscIter()
@@ -530,7 +512,7 @@ func TestSkipListIterCloseIdempotent(t *testing.T) {
 }
 
 func TestSkipListIterEmpty(t *testing.T) {
-	sl := sharkskiplist.New[int, string]()
+	sl := sharkskiplist.NewAsc[int, string]()
 
 	it := sl.NewAscIter()
 	defer it.Close()
@@ -546,7 +528,7 @@ func TestSkipListIterEmpty(t *testing.T) {
 }
 
 func TestSkipListIterHoldsLock(t *testing.T) {
-	sl := sharkskiplist.New[int, int]()
+	sl := sharkskiplist.NewAsc[int, int]()
 	sl.SetOrUpdate(1, 1)
 
 	it := sl.NewAscIter()
@@ -571,5 +553,139 @@ func TestSkipListIterHoldsLock(t *testing.T) {
 		// Close 后写操作完成
 	case <-time.After(time.Second):
 		t.Error("Close 后写操作应能完成")
+	}
+}
+
+func TestSkipListNewDesc(t *testing.T) {
+	sl := sharkskiplist.NewDesc[int, string]()
+	for _, k := range []int{5, 1, 4, 2, 3} {
+		sl.SetOrUpdate(k, "v")
+	}
+
+	// 点操作语义不变
+	if v, ok := sl.Get(3); !ok || v != "v" {
+		t.Errorf("Get(3) = (%q, %v), want (v, true)", v, ok)
+	}
+	if !sl.Contains(5) || sl.Contains(99) {
+		t.Error("Contains 语义错误")
+	}
+
+	// Min/Max 仍返回自然最小/最大
+	if k, _, ok := sl.Min(); !ok || k != 1 {
+		t.Errorf("Min = %d, want 1", k)
+	}
+	if k, _, ok := sl.Max(); !ok || k != 5 {
+		t.Errorf("Max = %d, want 5", k)
+	}
+
+	// RangeAsc 自然升序
+	var asc []int
+	sl.RangeAsc(func(k int, v string) bool { asc = append(asc, k); return true })
+	if !slices.Equal(asc, []int{1, 2, 3, 4, 5}) {
+		t.Errorf("RangeAsc = %v, want [1 2 3 4 5]", asc)
+	}
+
+	// RangeDesc 自然降序
+	var desc []int
+	sl.RangeDesc(func(k int, v string) bool { desc = append(desc, k); return true })
+	if !slices.Equal(desc, []int{5, 4, 3, 2, 1}) {
+		t.Errorf("RangeDesc = %v, want [5 4 3 2 1]", desc)
+	}
+
+	// Keys
+	if got := sl.KeysAsc(); !slices.Equal(got, []int{1, 2, 3, 4, 5}) {
+		t.Errorf("KeysAsc = %v, want [1 2 3 4 5]", got)
+	}
+	if got := sl.KeysDesc(); !slices.Equal(got, []int{5, 4, 3, 2, 1}) {
+		t.Errorf("KeysDesc = %v, want [5 4 3 2 1]", got)
+	}
+
+	// 迭代器
+	itDesc := sl.NewDescIter()
+	var iterDesc []int
+	for {
+		k, _, ok := itDesc.Next()
+		if !ok {
+			break
+		}
+		iterDesc = append(iterDesc, k)
+	}
+	itDesc.Close()
+	if !slices.Equal(iterDesc, []int{5, 4, 3, 2, 1}) {
+		t.Errorf("NewDescIter = %v, want [5 4 3 2 1]", iterDesc)
+	}
+
+	itAsc := sl.NewAscIter()
+	var iterAsc []int
+	for {
+		k, _, ok := itAsc.Next()
+		if !ok {
+			break
+		}
+		iterAsc = append(iterAsc, k)
+	}
+	itAsc.Close()
+	if !slices.Equal(iterAsc, []int{1, 2, 3, 4, 5}) {
+		t.Errorf("NewAscIter = %v, want [1 2 3 4 5]", iterAsc)
+	}
+
+	// RangeBetween：端点决定方向
+	var rb []int
+	sl.RangeBetween(2, 4, func(k int, v string) bool { rb = append(rb, k); return true })
+	if !slices.Equal(rb, []int{2, 3, 4}) {
+		t.Errorf("RangeBetween(2,4) = %v, want [2 3 4]", rb)
+	}
+	rb = rb[:0]
+	sl.RangeBetween(4, 2, func(k int, v string) bool { rb = append(rb, k); return true })
+	if !slices.Equal(rb, []int{4, 3, 2}) {
+		t.Errorf("RangeBetween(4,2) = %v, want [4 3 2]", rb)
+	}
+
+	// Ceiling/Floor 语义不变
+	if k, _, ok := sl.Ceiling(2); !ok || k != 2 {
+		t.Errorf("Ceiling(2) = %d, want 2", k)
+	}
+	if k, _, ok := sl.Floor(4); !ok || k != 4 {
+		t.Errorf("Floor(4) = %d, want 4", k)
+	}
+}
+
+func TestSkipListNewDescMinMaxEmpty(t *testing.T) {
+	sl := sharkskiplist.NewDesc[int, string]()
+	if _, _, ok := sl.Min(); ok {
+		t.Error("空 NewDesc Min 应返回 false")
+	}
+	if _, _, ok := sl.Max(); ok {
+		t.Error("空 NewDesc Max 应返回 false")
+	}
+}
+
+func TestSkipListNewDescWithComparator(t *testing.T) {
+	sl := sharkskiplist.NewDescWithComparator[int, string](
+		func(a, b int) int {
+			if a < b {
+				return -1
+			}
+			if a > b {
+				return 1
+			}
+			return 0
+		},
+	)
+	sl.SetOrUpdate(3, "c")
+	sl.SetOrUpdate(1, "a")
+	sl.SetOrUpdate(2, "b")
+
+	if k, _, ok := sl.Max(); !ok || k != 3 {
+		t.Errorf("Max = %d, want 3", k)
+	}
+	if k, _, ok := sl.Min(); !ok || k != 1 {
+		t.Errorf("Min = %d, want 1", k)
+	}
+
+	var desc []int
+	sl.RangeDesc(func(k int, v string) bool { desc = append(desc, k); return true })
+	if !slices.Equal(desc, []int{3, 2, 1}) {
+		t.Errorf("RangeDesc = %v, want [3 2 1]", desc)
 	}
 }
