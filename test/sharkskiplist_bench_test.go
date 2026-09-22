@@ -2,6 +2,7 @@ package test
 
 import (
 	"math/rand"
+	"runtime/debug"
 	"testing"
 
 	"github.com/xcodego/shark/sharkskiplist"
@@ -349,5 +350,82 @@ func BenchmarkSkipListNewDescRangeBetweenDesc(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		sl.RangeBetween(30000, 20000, func(k, v int) bool { return true })
+	}
+}
+
+// 100 万级数据 + 制造大量临时数据（Go GC 压力） -----------------------------
+
+const benchMillion = 1_000_000
+
+// BenchmarkSkipListMillionSeq 顺序插入百万级元素：每次插入分配一个新节点（堆对象），
+// 百万级节点分配会持续触发 Go GC。
+func BenchmarkSkipListMillionSeq(b *testing.B) {
+	b.ReportAllocs()
+	sl := sharkskiplist.NewAsc[int, int]()
+	i := 0
+	b.ResetTimer()
+	for b.Loop() {
+		sl.SetOrUpdate(i, i)
+		i++
+	}
+}
+
+// BenchmarkSkipListMillionRand 在 100 万 key 空间内随机写入/覆盖。
+func BenchmarkSkipListMillionRand(b *testing.B) {
+	b.ReportAllocs()
+	sl := sharkskiplist.NewAsc[int, int]()
+	b.ResetTimer()
+	for b.Loop() {
+		sl.SetOrUpdate(rand.Intn(benchMillion), 1)
+	}
+}
+
+// BenchmarkSkipListMillionGet 预置 100 万元素后随机查找。
+func BenchmarkSkipListMillionGet(b *testing.B) {
+	b.ReportAllocs()
+	sl := newBenchSkipList(benchMillion)
+	b.ResetTimer()
+	for b.Loop() {
+		_, _ = sl.Get(rand.Intn(benchMillion))
+	}
+}
+
+// BenchmarkSkipListMillionRangeAsc 遍历 100 万元素。
+func BenchmarkSkipListMillionRangeAsc(b *testing.B) {
+	b.ReportAllocs()
+	sl := newBenchSkipList(benchMillion)
+	b.ResetTimer()
+	for b.Loop() {
+		sl.RangeAsc(func(k, v int) bool { return true })
+	}
+}
+
+// BenchmarkSkipListMillionGarbage 制造大量临时数据：value 使用新分配的字节切片，
+// key 在固定空间内循环覆盖，旧 value 成为垃圾被 GC 回收，持续制造 GC 压力。
+func BenchmarkSkipListMillionGarbage(b *testing.B) {
+	b.ReportAllocs()
+	sl := sharkskiplist.NewAsc[int, []byte]()
+	const space = 100_000
+	i := 0
+	b.ResetTimer()
+	for b.Loop() {
+		sl.SetOrUpdate(i%space, make([]byte, 64))
+		i++
+	}
+}
+
+// BenchmarkSkipListMillionGarbageNoGC 与 MillionGarbage 相同但关闭 GC，
+// 用于量化 Go GC 在"制造大量临时数据"场景下的开销。
+func BenchmarkSkipListMillionGarbageNoGC(b *testing.B) {
+	debug.SetGCPercent(-1)
+	defer debug.SetGCPercent(100)
+	b.ReportAllocs()
+	sl := sharkskiplist.NewAsc[int, []byte]()
+	const space = 100_000
+	i := 0
+	b.ResetTimer()
+	for b.Loop() {
+		sl.SetOrUpdate(i%space, make([]byte, 64))
+		i++
 	}
 }

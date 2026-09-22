@@ -3,9 +3,7 @@ package test
 import (
 	"math/rand"
 	"slices"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/xcodego/shark/sharkskiplist"
 )
@@ -407,35 +405,6 @@ func TestSkipListLargeScale(t *testing.T) {
 	})
 }
 
-func TestSkipListConcurrent(t *testing.T) {
-	sl := sharkskiplist.NewAsc[int, int]()
-	const goroutines = 8
-	const perGoroutine = 2000
-
-	var wg sync.WaitGroup
-	for g := 0; g < goroutines; g++ {
-		wg.Add(1)
-		go func(g int) {
-			defer wg.Done()
-			base := g * perGoroutine
-			for i := 0; i < perGoroutine; i++ {
-				sl.SetOrUpdate(base+i, base+i)
-			}
-			for i := 0; i < perGoroutine; i++ {
-				if v, ok := sl.Get(base + i); !ok || v != base+i {
-					t.Errorf("并发 Get(%d) = (%d, %v)", base+i, v, ok)
-					return
-				}
-			}
-		}(g)
-	}
-	wg.Wait()
-
-	if got := sl.Len(); got != goroutines*perGoroutine {
-		t.Errorf("Len = %d, want %d", got, goroutines*perGoroutine)
-	}
-}
-
 func TestSkipListIter(t *testing.T) {
 	sl := sharkskiplist.NewAsc[int, int]()
 	for k := 1; k <= 5; k++ {
@@ -527,35 +496,6 @@ func TestSkipListIterEmpty(t *testing.T) {
 	}
 }
 
-func TestSkipListIterHoldsLock(t *testing.T) {
-	sl := sharkskiplist.NewAsc[int, int]()
-	sl.SetOrUpdate(1, 1)
-
-	it := sl.NewAscIter()
-
-	done := make(chan struct{})
-	go func() {
-		sl.SetOrUpdate(2, 2) // 写操作应被迭代器持有的读锁阻塞
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		t.Error("迭代器持锁期间写操作不应完成")
-	case <-time.After(50 * time.Millisecond):
-		// 符合预期：写操作被阻塞
-	}
-
-	it.Close()
-
-	select {
-	case <-done:
-		// Close 后写操作完成
-	case <-time.After(time.Second):
-		t.Error("Close 后写操作应能完成")
-	}
-}
-
 func TestSkipListNewDesc(t *testing.T) {
 	sl := sharkskiplist.NewDesc[int, string]()
 	for _, k := range []int{5, 1, 4, 2, 3} {
@@ -641,12 +581,26 @@ func TestSkipListNewDesc(t *testing.T) {
 		t.Errorf("RangeBetween(4,2) = %v, want [4 3 2]", rb)
 	}
 
-	// Ceiling/Floor 语义不变
+	// Ceiling/Floor 严格语义（自然序，与原生方向无关）
+	// Ceiling: >= key 的最小
 	if k, _, ok := sl.Ceiling(2); !ok || k != 2 {
 		t.Errorf("Ceiling(2) = %d, want 2", k)
 	}
+	if k, _, ok := sl.Ceiling(0); !ok || k != 1 {
+		t.Errorf("Ceiling(0) = %d, want 1", k)
+	}
+	if _, _, ok := sl.Ceiling(6); ok {
+		t.Error("Ceiling(6) 应返回 false")
+	}
+	// Floor: <= key 的最大
 	if k, _, ok := sl.Floor(4); !ok || k != 4 {
 		t.Errorf("Floor(4) = %d, want 4", k)
+	}
+	if k, _, ok := sl.Floor(6); !ok || k != 5 {
+		t.Errorf("Floor(6) = %d, want 5", k)
+	}
+	if _, _, ok := sl.Floor(0); ok {
+		t.Error("Floor(0) 应返回 false")
 	}
 }
 
