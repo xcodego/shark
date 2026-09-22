@@ -19,7 +19,7 @@ import (
 
 // swag init --parseDependency -g  main.go
 
-// test the application
+// test the application1
 
 func main() {
 	options, err := sharkapp.NewOption("kgame", "game-test")
