@@ -19,6 +19,8 @@ import (
 
 // swag init --parseDependency -g  main.go
 
+// test the application
+
 func main() {
 	options, err := sharkapp.NewOption("kgame", "game-test")
 	if err != nil {
