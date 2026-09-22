@@ -24,6 +24,7 @@ Shark 封装了微服务开发中常见的中间件和工具库，提供统一�
 - **泛型工具** — PageQuery 分页、TableScan 扫描、WithTimeout 超时控制、DrainChannelN 管道排空、Pointer 指针安全
 - **多层缓存防击穿** — 基于 singleflight + seeker 链的泛型缓存穿透防护（本地缓存 → Redis → DB 多级回退）
 - **RBAC 权限树** — 多叉树权限模型，支持父子角色继承、权限裁剪、Sync 生成编辑树、Flatten/Permissions 高效查表
+- **有序映射（跳表）** — 泛型 SkipList，O(log n) 查找/插入/删除，支持范围查询、Ceiling/Floor、有序遍历与并发安全
 
 ## 快速开始
 
@@ -117,6 +118,7 @@ func (s *MyService) Start() {
 | `sharkutils` | 通用工具函数 | `RandNum`, `Md5`, `GetClientIp`, `BcryptHash`, `BcryptCheck` |
 | `sharkverify` | TOTP 两步验证 | `VerifyCode`, `NewSecret`, `GetQrCodeUrl` |
 | `sharkzip` | Zlib 数据压缩 | `Compress`, `Decompress` |
+| `sharkskiplist` | 有序映射（跳表） | `SkipList`, `New`, `NewWithComparator`, `SetOrUpdate`, `SetIfNotExists`, `Get`, `Delete`, `RangeAsc/RangeDesc` |
 
 ## 核心模块详解
 

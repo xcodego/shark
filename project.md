@@ -58,6 +58,7 @@ app.Hunt(&Test{svc: app})
 | `sharkjson` | JSON 序列化 | `ParseJsonBytes[T]`、`ToJsonString` |
 | `sharkverify` | TOTP 两步验证 | `NewSecret`、`VerifyCode`、`GetQrCodeUrl` |
 | `sharkzip` | Zlib 压缩 | `Compress`、`Decompress` |
+| `sharkskiplist` | 有序映射(跳表) | `SkipList`、`New`、`NewWithComparator`、`SetOrUpdate/SetIfNotExists/Get/Delete`、`RangeAsc/RangeDesc/RangeBetween`、`Ceiling/Floor` |
 | `sharkrabbitmq` | RabbitMQ(批量消费) | `Client`、`Publish`、`Consume`、`BatchConsume` |
 | `sharkmongodb` | MongoDB | `New` (mongo.Client) |
 | `sharkminio` | MinIO 对象存储 | `New` (minio.Client) |
@@ -411,6 +412,12 @@ sharkdecimal.Normalize(v, precision)
 |---|---|
 | `sharkzip/sharkzip.go` | `Compress/Decompress` Zlib 压缩 |
 
+### sharkskiplist — 有序映射（跳表）
+
+| 文件 | 说明 |
+|---|---|
+| `sharkskiplist/sharkskiplist.go` | `SkipList[K,V]` 泛型有序映射、`New/NewWithComparator/SetOrUpdate/SetIfNotExists/Get/Delete/Contains/Len/Clear/Min/Max/Ceiling/Floor/RangeAsc/RangeDesc/RangeBetween/KeysAsc/KeysDesc/ValuesAsc/ValuesDesc/Iter/NewAscIter/NewDescIter/Next/Close` |
+
 ### sharkrabbitmq — RabbitMQ
 
 | 文件 | 说明 |
@@ -459,6 +466,7 @@ sharkdecimal.Normalize(v, precision)
 | `test/sharkdecimal_test.go` | sharkdecimal 包单元测试 |
 | `test/sharksnowflake_test.go` | sharksnowflake 包单元测试 |
 | `test/sharkzip_test.go` | sharkzip 包单元测试 |
+| `test/sharkskiplist_test.go` | sharkskiplist 包单元测试 |
 | `test/sharksql_func_test.go` | sharksql 函数单元测试 |
 | `test/sharksql_builder_test.go` | sharksql Builder 单元测试 |
 | `test/sharksql_where_test.go` | sharksql Where 条件单元测试 |
