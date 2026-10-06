@@ -348,7 +348,7 @@ func MakeKey(args ...any) string {
 }
 
 // CdcUnmarshal 将 CDC 的 JSON 数据（所有字段值均为字符串）反序列化到 v（必须为非 nil 的结构体指针）。
-// 字段按 json tag（缺省为字段名，忽略大小写）匹配，并按字段的实际类型转换：
+// 仅解析带 json tag 名称的字段（无 tag 或 tag 为 "-" 的字段忽略），key 精确匹配（区分大小写），并按字段的实际类型转换：
 // 整型/浮点/布尔/字符串/[]byte/time.Time（使用 time.Local 解析）/指针，
 // 其余复合类型（slice、map、struct 等）将字符串内容按 JSON 解析。
 // 值为 null 或空字符串时，非字符串字段保持零值，指针字段置为 nil。
@@ -364,16 +364,8 @@ func CdcUnmarshal(data string, v any) error {
 	if err := json.Unmarshal([]byte(data), &raw); err != nil {
 		return fmt.Errorf("cdc: unmarshal data: %w", err)
 	}
-	values := make(map[string]*string, len(raw))
-	for k, val := range raw {
-		values[strings.ToLower(k)] = val
-	}
 
 	timeType := reflect.TypeOf(time.Time{})
-	layouts := []string{
-		time.RFC3339Nano, "2006-01-02 15:04:05.999999999", "2006-01-02T15:04:05.999999999",
-		"2006-01-02 15:04:05.999999999Z07:00", "2006-01-02", "15:04:05.999999999",
-	}
 
 	var setValue func(fv reflect.Value, sp *string) error
 	setValue = func(fv reflect.Value, sp *string) error {
@@ -403,13 +395,31 @@ func CdcUnmarshal(data string, v any) error {
 			return nil
 		}
 		if fv.Type() == timeType {
-			for _, l := range layouts {
-				if t, err := time.ParseInLocation(l, s, time.Local); err == nil {
-					fv.Set(reflect.ValueOf(t))
-					return nil
+			var layout string
+			switch {
+			case strings.Contains(s, "T"):
+				if len(s) > 19 && strings.ContainsAny(s[19:], "Z+-") {
+					layout = time.RFC3339Nano
+				} else {
+					layout = "2006-01-02T15:04:05.999999999"
 				}
+			case len(s) == len("2006-01-02"):
+				layout = "2006-01-02"
+			case len(s) >= len("2006-01-02") && s[4] == '-' && s[7] == '-':
+				if strings.ContainsAny(s[10:], "+-Z") {
+					layout = "2006-01-02 15:04:05.999999999Z07:00"
+				} else {
+					layout = "2006-01-02 15:04:05.999999999"
+				}
+			default:
+				layout = "15:04:05.999999999"
 			}
-			return fmt.Errorf("invalid time %q", s)
+			t, err := time.ParseInLocation(layout, s, time.Local)
+			if err != nil {
+				return fmt.Errorf("invalid time %q: %w", s, err)
+			}
+			fv.Set(reflect.ValueOf(t))
+			return nil
 		}
 		switch fv.Kind() {
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
@@ -466,24 +476,18 @@ func CdcUnmarshal(data string, v any) error {
 		st := sv.Type()
 		for i := 0; i < st.NumField(); i++ {
 			sf := st.Field(i)
-			tag := sf.Tag.Get("json")
-			name, _, _ := strings.Cut(tag, ",")
-			if name == "-" && tag == "-" {
-				continue
-			}
+			name, _, _ := strings.Cut(sf.Tag.Get("json"), ",")
 			if sf.Anonymous && name == "" && sf.Type.Kind() == reflect.Struct && sf.Type != timeType {
 				if err := fill(sv.Field(i)); err != nil {
 					return err
 				}
 				continue
 			}
-			if !sf.IsExported() {
+			// 没有 json tag 名称或 tag 为 "-" 的字段不解析
+			if name == "" || name == "-" || !sf.IsExported() {
 				continue
 			}
-			if name == "" {
-				name = sf.Name
-			}
-			sp, ok := values[strings.ToLower(name)]
+			sp, ok := raw[name]
 			if !ok {
 				continue
 			}
