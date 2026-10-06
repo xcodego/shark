@@ -5,8 +5,10 @@ package sharkfunc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -343,4 +345,153 @@ func MakeKey(args ...any) string {
 		b.WriteByte('|')
 	}
 	return b.String()
+}
+
+// CdcUnmarshal 将 CDC 的 JSON 数据（所有字段值均为字符串）反序列化到 v（必须为非 nil 的结构体指针）。
+// 字段按 json tag（缺省为字段名，忽略大小写）匹配，并按字段的实际类型转换：
+// 整型/浮点/布尔/字符串/[]byte/time.Time（使用 time.Local 解析）/指针，
+// 其余复合类型（slice、map、struct 等）将字符串内容按 JSON 解析。
+// 值为 null 或空字符串时，非字符串字段保持零值，指针字段置为 nil。
+func CdcUnmarshal(data string, v any) error {
+	if data == "" {
+		return fmt.Errorf("cdc: data is empty")
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() || rv.Elem().Kind() != reflect.Struct {
+		return fmt.Errorf("cdc: v must be a non-nil pointer to struct")
+	}
+	raw := make(map[string]*string)
+	if err := json.Unmarshal([]byte(data), &raw); err != nil {
+		return fmt.Errorf("cdc: unmarshal data: %w", err)
+	}
+	values := make(map[string]*string, len(raw))
+	for k, val := range raw {
+		values[strings.ToLower(k)] = val
+	}
+
+	timeType := reflect.TypeOf(time.Time{})
+	layouts := []string{
+		time.RFC3339Nano, "2006-01-02 15:04:05.999999999", "2006-01-02T15:04:05.999999999",
+		"2006-01-02 15:04:05.999999999Z07:00", "2006-01-02", "15:04:05.999999999",
+	}
+
+	var setValue func(fv reflect.Value, sp *string) error
+	setValue = func(fv reflect.Value, sp *string) error {
+		if fv.Kind() == reflect.Pointer {
+			if sp == nil || (*sp == "" && fv.Type().Elem().Kind() != reflect.String) {
+				fv.SetZero()
+				return nil
+			}
+			nv := reflect.New(fv.Type().Elem())
+			if err := setValue(nv.Elem(), sp); err != nil {
+				return err
+			}
+			fv.Set(nv)
+			return nil
+		}
+		if sp == nil {
+			fv.SetZero()
+			return nil
+		}
+		s := *sp
+		if fv.Kind() == reflect.String {
+			fv.SetString(s)
+			return nil
+		}
+		if s == "" {
+			fv.SetZero()
+			return nil
+		}
+		if fv.Type() == timeType {
+			for _, l := range layouts {
+				if t, err := time.ParseInLocation(l, s, time.Local); err == nil {
+					fv.Set(reflect.ValueOf(t))
+					return nil
+				}
+			}
+			return fmt.Errorf("invalid time %q", s)
+		}
+		switch fv.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			n, err := strconv.ParseInt(s, 10, 64)
+			if err != nil {
+				f, ferr := strconv.ParseFloat(s, 64)
+				if ferr != nil || f != float64(int64(f)) {
+					return err
+				}
+				n = int64(f)
+			}
+			if fv.OverflowInt(n) {
+				return fmt.Errorf("value %s overflows %s", s, fv.Type())
+			}
+			fv.SetInt(n)
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			n, err := strconv.ParseUint(s, 10, 64)
+			if err != nil {
+				return err
+			}
+			if fv.OverflowUint(n) {
+				return fmt.Errorf("value %s overflows %s", s, fv.Type())
+			}
+			fv.SetUint(n)
+		case reflect.Float32, reflect.Float64:
+			f, err := strconv.ParseFloat(s, 64)
+			if err != nil {
+				return err
+			}
+			fv.SetFloat(f)
+		case reflect.Bool:
+			switch strings.ToLower(s) {
+			case "1", "t", "true", "y", "yes", "on":
+				fv.SetBool(true)
+			case "0", "f", "false", "n", "no", "off":
+				fv.SetBool(false)
+			default:
+				return fmt.Errorf("invalid bool %q", s)
+			}
+		case reflect.Slice:
+			if fv.Type().Elem().Kind() == reflect.Uint8 {
+				fv.SetBytes([]byte(s))
+				return nil
+			}
+			fallthrough
+		default:
+			return json.Unmarshal([]byte(s), fv.Addr().Interface())
+		}
+		return nil
+	}
+
+	var fill func(sv reflect.Value) error
+	fill = func(sv reflect.Value) error {
+		st := sv.Type()
+		for i := 0; i < st.NumField(); i++ {
+			sf := st.Field(i)
+			tag := sf.Tag.Get("json")
+			name, _, _ := strings.Cut(tag, ",")
+			if name == "-" && tag == "-" {
+				continue
+			}
+			if sf.Anonymous && name == "" && sf.Type.Kind() == reflect.Struct && sf.Type != timeType {
+				if err := fill(sv.Field(i)); err != nil {
+					return err
+				}
+				continue
+			}
+			if !sf.IsExported() {
+				continue
+			}
+			if name == "" {
+				name = sf.Name
+			}
+			sp, ok := values[strings.ToLower(name)]
+			if !ok {
+				continue
+			}
+			if err := setValue(sv.Field(i), sp); err != nil {
+				return fmt.Errorf("cdc: field %s: %w", sf.Name, err)
+			}
+		}
+		return nil
+	}
+	return fill(rv.Elem())
 }
