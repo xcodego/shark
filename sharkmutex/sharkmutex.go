@@ -22,6 +22,7 @@ type SharkMutexOption struct {
 	expire     *time.Duration
 	retryDelay *time.Duration
 	trys       *int
+	instance   *redsync.Mutex
 }
 
 func (o *SharkMutexOption) Expire(expire time.Duration) *SharkMutexOption {
@@ -73,18 +74,25 @@ func (m *SharkMutex) New(value ...any) *SharkMutexOption {
 	}
 }
 
-func (o *SharkMutexOption) Mutex() *redsync.Mutex {
-	trys := 1
-	expire := time.Minute
-	if o.trys != nil {
-		trys = *o.trys
+func (o *SharkMutexOption) Lock() error {
+	if o.instance == nil {
+		trys := 1
+		expire := time.Minute
+		if o.trys != nil {
+			trys = *o.trys
+		}
+		if o.expire != nil {
+			expire = *o.expire
+		}
+		if o.retryDelay != nil {
+			o.instance = o.mutex.NewMutex(o.key, redsync.WithExpiry(expire), redsync.WithRetryDelay(*o.retryDelay), redsync.WithTries(trys))
+		} else {
+			o.instance = o.mutex.NewMutex(o.key, redsync.WithExpiry(expire), redsync.WithTries(trys))
+		}
 	}
-	if o.expire != nil {
-		expire = *o.expire
-	}
-	if o.retryDelay != nil {
-		return o.mutex.NewMutex(o.key, redsync.WithExpiry(expire), redsync.WithRetryDelay(*o.retryDelay), redsync.WithTries(trys))
-	} else {
-		return o.mutex.NewMutex(o.key, redsync.WithExpiry(expire), redsync.WithTries(trys))
-	}
+	return o.instance.Lock()
+}
+
+func (o *SharkMutexOption) Unlock() (bool, error) {
+	return o.instance.Unlock()
 }
