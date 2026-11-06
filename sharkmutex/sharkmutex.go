@@ -94,5 +94,8 @@ func (o *SharkMutexOption) Lock() error {
 }
 
 func (o *SharkMutexOption) Unlock() (bool, error) {
+	if o.instance == nil {
+		return false, fmt.Errorf("mutex not initialized")
+	}
 	return o.instance.Unlock()
 }
