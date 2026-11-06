@@ -222,7 +222,7 @@ func New(options *Options) (*App, error) {
 		if err == nil {
 			app.RedisCluster = cluster
 			app.RedisHelper = sharkredis.NewHelperWithCluster(cluster)
-			app.Mutex = sharkmutex.NewWithCluster(app.Project, cluster)
+			app.Mutex = sharkmutex.NewWithCluster(app.Project, app.Name, cluster)
 			app.Logger.Info("连接redis cluster成功", zap.Strings("host", options.redis.Host))
 		} else {
 			errMsg := err.Error()
@@ -237,7 +237,7 @@ func New(options *Options) (*App, error) {
 				}
 				app.RedisClient = client
 				app.RedisHelper = sharkredis.NewHelperWithClient(client)
-				app.Mutex = sharkmutex.NewWithClient(app.Project, client)
+				app.Mutex = sharkmutex.NewWithClient(app.Project, app.Name, client)
 				app.Logger.Info("连接redis client成功", zap.Strings("host", options.redis.Host))
 			} else {
 				// 集群模式连接失败（非"不支持集群"的原因，如网络不通、密码错误等）
@@ -258,7 +258,7 @@ func New(options *Options) (*App, error) {
 		app.Logger.Info("连接redis cluster成功", zap.Strings("host", options.redis_cluster.Host))
 		app.RedisCluster = redis
 		app.RedisHelper = sharkredis.NewHelperWithCluster(redis)
-		app.Mutex = sharkmutex.NewWithCluster(app.Project, redis)
+		app.Mutex = sharkmutex.NewWithCluster(app.Project, app.Name, redis)
 	}
 
 	// ---- Redis Client 明确配置（独立于自动探测） ----
@@ -272,7 +272,7 @@ func New(options *Options) (*App, error) {
 		app.Logger.Info("连接redis client成功", zap.Strings("host", options.redis_client.Host))
 		app.RedisClient = redis
 		app.RedisHelper = sharkredis.NewHelperWithClient(redis)
-		app.Mutex = sharkmutex.NewWithClient(app.Project, redis)
+		app.Mutex = sharkmutex.NewWithClient(app.Project, app.Name, redis)
 	}
 
 	// ---- MySQL 初始化 ----

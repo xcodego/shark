@@ -12,6 +12,7 @@ import (
 
 type SharkMutex struct {
 	project    string
+	name       string
 	redisMutex *redsync.Redsync
 }
 
@@ -38,16 +39,18 @@ func (o *SharkMutexOption) WithTries(tries int) *SharkMutexOption {
 	return o
 }
 
-func NewWithClient(project string, client *redis.Client) *SharkMutex {
+func NewWithClient(project string, name string, client *redis.Client) *SharkMutex {
 	return &SharkMutex{
 		project:    project,
+		name:       name,
 		redisMutex: redsync.New(goredis.NewPool(client)),
 	}
 }
 
-func NewWithCluster(project string, cluster *redis.ClusterClient) *SharkMutex {
+func NewWithCluster(project string, name string, cluster *redis.ClusterClient) *SharkMutex {
 	return &SharkMutex{
 		project:    project,
+		name:       name,
 		redisMutex: redsync.New(goredis.NewPool(cluster)),
 	}
 }
@@ -58,7 +61,7 @@ func (m *SharkMutex) lockKey(value ...any) string {
 		sv[i] = fmt.Sprint(v)
 	}
 	s := strings.Join(sv, ":")
-	return fmt.Sprintf("%v:mutex:%v", m.project, s)
+	return fmt.Sprintf("%v:mutex:%v:%v", m.project, m.name, s)
 }
 
 // 默认过期时间 1 分钟, 重试间隔 100 毫秒, 尝试 1 次
