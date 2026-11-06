@@ -43,6 +43,7 @@ import (
 	"github.com/xcodego/shark/sharkkafka"
 	"github.com/xcodego/shark/sharkminio"
 	"github.com/xcodego/shark/sharkmongodb"
+	"github.com/xcodego/shark/sharkmutex"
 	"github.com/xcodego/shark/sharkrabbitmq"
 	"github.com/xcodego/shark/sharkredis"
 	"github.com/xcodego/shark/sharkrisingwave"
@@ -128,6 +129,8 @@ type App struct {
 	GinEngine *gin.Engine
 	// SharkWS WebSocket 服务组件
 	Ws *sharkws.SharkWS
+	// Mutex 分布式锁组件
+	Mutex *sharkmutex.SharkMutex
 
 	// --- 内部组件（不对外暴露） ---
 	// cancelFunc 取消 Context，触发优雅关闭
@@ -219,6 +222,7 @@ func New(options *Options) (*App, error) {
 		if err == nil {
 			app.RedisCluster = cluster
 			app.RedisHelper = sharkredis.NewHelperWithCluster(cluster)
+			app.Mutex = sharkmutex.NewWithCluster(app.Project, cluster)
 			app.Logger.Info("连接redis cluster成功", zap.Strings("host", options.redis.Host))
 		} else {
 			errMsg := err.Error()
@@ -233,6 +237,7 @@ func New(options *Options) (*App, error) {
 				}
 				app.RedisClient = client
 				app.RedisHelper = sharkredis.NewHelperWithClient(client)
+				app.Mutex = sharkmutex.NewWithClient(app.Project, client)
 				app.Logger.Info("连接redis client成功", zap.Strings("host", options.redis.Host))
 			} else {
 				// 集群模式连接失败（非"不支持集群"的原因，如网络不通、密码错误等）
@@ -253,6 +258,7 @@ func New(options *Options) (*App, error) {
 		app.Logger.Info("连接redis cluster成功", zap.Strings("host", options.redis_cluster.Host))
 		app.RedisCluster = redis
 		app.RedisHelper = sharkredis.NewHelperWithCluster(redis)
+		app.Mutex = sharkmutex.NewWithCluster(app.Project, redis)
 	}
 
 	// ---- Redis Client 明确配置（独立于自动探测） ----
@@ -266,6 +272,7 @@ func New(options *Options) (*App, error) {
 		app.Logger.Info("连接redis client成功", zap.Strings("host", options.redis_client.Host))
 		app.RedisClient = redis
 		app.RedisHelper = sharkredis.NewHelperWithClient(redis)
+		app.Mutex = sharkmutex.NewWithClient(app.Project, redis)
 	}
 
 	// ---- MySQL 初始化 ----
