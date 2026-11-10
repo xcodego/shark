@@ -45,6 +45,7 @@ package sharksql
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
@@ -66,9 +67,20 @@ import (
 //	    return nil, err
 //	}
 func IsDuplicateKeyError(err error, key ...string) bool {
+	if err == nil {
+		return false
+	}
 	var mysqlErr *mysql.MySQLError
 	if errors.As(err, &mysqlErr) {
 		if mysqlErr.Number == 1062 {
+			if len(key) > 0 {
+				s := err.Error()
+				for _, k := range key {
+					if !strings.Contains(s, k) {
+						return false
+					}
+				}
+			}
 			return true
 		}
 	}
