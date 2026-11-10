@@ -75,6 +75,13 @@ func IsDuplicateKey(err error) bool {
 	return false
 }
 
+func IsNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, gorm.ErrRecordNotFound)
+}
+
 func ToFindSql(db *gorm.DB) string {
 	tx := db.Session(&gorm.Session{DryRun: true}).Find(nil)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
