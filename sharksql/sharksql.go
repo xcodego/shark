@@ -65,7 +65,7 @@ import (
 //	    }
 //	    return nil, err
 //	}
-func IsDuplicateKey(err error) bool {
+func IsDuplicateKeyError(err error, key ...string) bool {
 	var mysqlErr *mysql.MySQLError
 	if errors.As(err, &mysqlErr) {
 		if mysqlErr.Number == 1062 {
@@ -75,7 +75,7 @@ func IsDuplicateKey(err error) bool {
 	return false
 }
 
-func IsNotFound(err error) bool {
+func IsNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
