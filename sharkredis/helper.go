@@ -771,7 +771,7 @@ func (h *Helper) mutexKey(value ...any) string {
 	return fmt.Sprintf("%v:mutex:%v:%v", h.project, h.name, s)
 }
 
-func (h *Helper) New(value ...any) *SharkMutex {
+func (h *Helper) NewMutex(value ...any) *SharkMutex {
 	key := h.mutexKey(value...)
 	return &SharkMutex{
 		mutex: h.redisMutex,
