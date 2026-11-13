@@ -14,10 +14,13 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/bytedance/sonic"   // 高性能 JSON 编解码器（字节跳动开源）
+	"github.com/bytedance/sonic" // 高性能 JSON 编解码器（字节跳动开源）
+	"github.com/go-redsync/redsync/v4"
+	goredis "github.com/go-redsync/redsync/v4/redis/goredis/v9"
 	"github.com/redis/go-redis/v9" // go-redis v9，支持集群/单机
 	"github.com/tidwall/gjson"     // 快速 JSON 路径查询，用于 HSetObject 中遍历 JSON 对象
 )
@@ -42,23 +45,32 @@ import (
 //	err := helper.SetObject(ctx, "key", someStruct, time.Hour).Err()
 //	err := helper.GetObject(ctx, "key", &someStruct)
 type Helper struct {
-	client  *redis.Client        // 单机/主从模式客户端，非 nil 时优先使用
-	cluster *redis.ClusterClient // 集群模式客户端，当 client 为 nil 时使用
+	project    string
+	name       string
+	client     *redis.Client        // 单机/主从模式客户端，非 nil 时优先使用
+	cluster    *redis.ClusterClient // 集群模式客户端，当 client 为 nil 时使用
+	redisMutex *redsync.Redsync
 }
 
 // NewHelperWithClient 使用单节点 Redis 客户端构造 Helper。
 // 适用于调用方已经持有 *redis.Client 的场景（如由 NewClient 创建）。
-func NewHelperWithClient(client *redis.Client) *Helper {
+func NewHelperWithClient(client *redis.Client, project, name string) *Helper {
 	return &Helper{
-		client: client,
+		project:    project,
+		name:       name,
+		client:     client,
+		redisMutex: redsync.New(goredis.NewPool(client)),
 	}
 }
 
 // NewHelperWithCluster 使用 Redis 集群客户端构造 Helper。
 // 适用于调用方已经持有 *redis.ClusterClient 的场景（如由 NewCluster 创建）。
-func NewHelperWithCluster(cluster *redis.ClusterClient) *Helper {
+func NewHelperWithCluster(cluster *redis.ClusterClient, project, name string) *Helper {
 	return &Helper{
-		cluster: cluster,
+		project:    project,
+		name:       name,
+		cluster:    cluster,
+		redisMutex: redsync.New(goredis.NewPool(cluster)),
 	}
 }
 
@@ -748,4 +760,21 @@ func (h *Helper) HMGetToMap(ctx context.Context, key string, fields ...string) (
 		}
 	}
 	return result, nil
+}
+
+func (h *Helper) mutexKey(value ...any) string {
+	sv := make([]string, len(value))
+	for i, v := range value {
+		sv[i] = fmt.Sprint(v)
+	}
+	s := strings.Join(sv, ":")
+	return fmt.Sprintf("%v:mutex:%v:%v", h.project, h.name, s)
+}
+
+func (h *Helper) New(value ...any) *SharkMutex {
+	key := h.mutexKey(value...)
+	return &SharkMutex{
+		mutex: h.redisMutex,
+		key:   key,
+	}
 }
