@@ -1,12 +1,14 @@
+// Package sharkcache 提供支持多级回源和并发请求合并的泛型缓存。
 package sharkcache
 
 import (
 	"errors"
 
-	"github.com/xcodego/shark/sharkfunc"
+	"github.com/xcodego/shark/sharkutils"
 	"golang.org/x/sync/singleflight"
 )
 
+// ErrNotFound indicates that no seeker returned a value.
 var ErrNotFound = errors.New("sharkcache: not found")
 
 // ErrTypeAssertion 类型断言失败，通常是因为 seeker 返回的类型与泛型 T 不匹配。
@@ -91,7 +93,7 @@ func New[T any](seekers ...func(args ...any) (*T, error)) *Cache[T] {
 func (c *Cache[T]) Get(args ...any) (*T, error) {
 	// 将参数序列化为字节后计算 MD5，作为 singleflight 的去重 key
 
-	key := sharkfunc.MakeKey(args...)
+	key := sharkutils.MakeKey(args...)
 
 	// singleflight: 同一 key 的并发请求只会执行一次
 	v, err, _ := c.sg.Do(key, func() (any, error) {

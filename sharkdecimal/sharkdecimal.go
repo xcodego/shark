@@ -1,47 +1,9 @@
 // Package sharkdecimal 提供基于 shopspring/decimal 的高精度数值处理工具。
 //
-// 核心功能：
-//  1. 类型归一化：将任意数值类型（float/int/uint/string/decimal.Decimal）统一转换为 decimal.Decimal
-//  2. 精度控制：通过 Round + Truncate 组合，消除浮点累积误差并精确截断到指定位数
-//  3. 便捷函数：Normalize2（金额）和 Normalize6（汇率/费率）覆盖最常见的小数位数
-//
-// 处理流程（Normalize 系列函数）：
-//  1. 类型转换：将输入 v 转为 decimal.Decimal（支持 10+ 种 Go 数值类型）
-//  2. Round(roundScale)：以不低于 8 位的高精度四舍五入，消除 float32/float64 的累积误差
-//  3. Truncate(places)：截断到目标小数位数（不做四舍五入，直接去掉多余位）
-//
-// 与 math/big.Rat 的区别：
-//   - decimal.Decimal 是十进制定点数，天然适合金额计算（无二进制浮点精度问题）
-//   - 支持 JSON 序列化/反序列化（数字以字符串形式存储，精度不丢失）
-//   - 支持 GORM 数据库扫描（sql.Scanner 接口）
-//
-// 重要：Normalize 使用 Truncate（截断），不是 Round（四舍五入）！
+// Normalize 系列支持多种数值类型，并提供常用的 2 位、6 位精度快捷函数。
+// 结果会截断到目标小数位，不会四舍五入；需要四舍五入时请使用 decimal.Decimal.Round。
 //
 //	Normalize(19.999, 2) → 19.99（截断）
-//	若需要四舍五入：decimal.NewFromFloat(19.999).Round(2) → 20.00
-//
-// 使用示例：
-//
-//	import sd "github.com/xcodego/shark/sharkdecimal"
-//
-//	// 金额计算（保留 2 位）
-//	price := sd.Normalize2(19.999)          // 19.99
-//	tax := sd.Normalize2("3.50")            // 3.50
-//	total := price.Add(tax)                 // 23.49
-//
-//	// 汇率计算（保留 6 位）
-//	rate := sd.Normalize6(7.12345678)       // 7.123456
-//	usdAmount := sd.Normalize2(100)
-//	cnyAmount := usdAmount.Mul(rate)        // decimal 乘 decimal
-//	result := sd.Normalize2(cnyAmount)       // 最终金额保留 2 位
-//
-//	// 自定义精度（保留 4 位）
-//	score := sd.Normalize(3.1415926535, 4)  // 3.1415
-//
-//	// 数据库读写（decimal.Decimal 实现了 sql.Scanner）
-//	type Product struct {
-//	    Price decimal.Decimal `gorm:"column:price"`
-//	}
 package sharkdecimal
 
 import (

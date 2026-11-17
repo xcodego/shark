@@ -1,44 +1,8 @@
 // Package sharkgrpc 提供 gRPC 服务端监听，以及基于 Redis 地址列表的客户端连接管理。
 //
-// 核心设计：
-//  1. 服务端只负责本机端口监听。进程不知道外部如何连到自己（公网 IP / VIP / K8s Service），
-//     因此不向 Redis 注册自身地址，服务发现不依赖自注册。
-//  2. Redis 中的地址列表由知道可达地址的外部系统写入（key：{project}:grpc:{serviceName}，value 为 JSON 数组）
-//  3. 客户端从 Redis 读取目标地址；后台协程每 5 秒检查列表变化并更新 resolver
-//  4. 连接复用：通过 singleflight 合并并发请求，避免重复创建同一服务的连接
-//  5. 全局连接池：使用 sync.Map 存储所有已建立的 gRPC 连接，按服务名索引
-//  6. 负载均衡：客户端使用 round_robin 策略在多个服务端实例间分配请求
-//  7. 重试机制：内置重试策略（最多 3 次，指数退避），处理 UNAVAILABLE 和 RESOURCE_EXHAUSTED
-//
-// 客户端发现流程：
-//  1. Redis key：{project}:grpc:{serviceName}，value 如 ["10.0.0.1:50051","10.0.0.2:50051"]
-//  2. GetRpcConnection 读取 Redis。key 不存在或值为空时写入 "[]" 占位（初始化配置，nil 写成空数组），
-//     避免后续请求反复查询空 key；外部写入真实地址后即可被轮询到。这不是服务端自注册。
-//  3. 后台协程 updateResolver 每 5 秒轮询 Redis，检测地址变化并更新解析器
-//  4. gRPC 内置的 round_robin 负载均衡器自动选择地址
-//
-// 典型使用场景：
-//   - 微服务间 gRPC 调用（如 A 服务调用 B 服务的 gRPC 接口）
-//   - 地址列表变更时客户端自动切换实例
-//   - 多实例部署时 round_robin 负载均衡
-//
-// 使用示例（服务端）：
-//
-//	// 创建 RPC 服务端（只监听，不注册自身地址）
-//	rpcServer := sharkgrpc.New(ctx, "myproject", rdb, logger, 50051)
-//
-//	// 注册 gRPC 服务
-//	pb.RegisterMyServiceServer(rpcServer.Server, &myServiceImpl{})
-//
-// 使用示例（客户端）：
-//
-//	// 获取到目标服务的连接（自动服务发现 + 负载均衡）
-//	conn, err := rpcServer.GetRpcConnection("order-service")
-//	if err != nil {
-//	    log.Fatalf("获取连接失败: %v", err)
-//	}
-//	client := pb.NewOrderServiceClient(conn)
-//	resp, err := client.CreateOrder(ctx, &pb.CreateOrderReq{...})
+// Redis 地址列表由外部系统维护，键为 {project}:grpc:{serviceName}，值为地址 JSON 数组；
+// 服务端只监听本地端口，不会向 Redis 注册自身。客户端定期刷新地址，并通过
+// round_robin 负载均衡和连接复用访问服务实例。
 package sharkgrpc
 
 import (

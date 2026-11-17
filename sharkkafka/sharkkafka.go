@@ -1,47 +1,7 @@
 // Package sharkkafka 提供 Kafka 生产者和消费者的统一封装。
 //
-// 核心设计：
-//  1. 连接管理：通过 Config 统一配置 Broker 地址、SASL 认证、TLS 加密，自动创建 Dialer
-//  2. Writer 池化：按 topic 缓存 Writer 实例，避免重复创建，支持线程安全读写
-//  3. 批量生产者：内置批量发送优化（BatchSize=10000, BatchBytes=2MB, BatchTimeout=1s）
-//  4. 批量消费者：内置批量拉取 + 管道缓冲 + 自动提交 offset，支持优雅退出
-//  5. 容错设计：生产者使用 RequireOne 确认（性能优先）；消费者 offset 提交失败会一直重试直到成功或 ctx 取消
-//  6. 安全认证：支持 SASL/SCRAM-SHA512 认证 + TLS 加密
-//
-// 使用场景：
-//   - 消息队列：服务间异步解耦通信
-//   - 事件溯源：记录业务事件到 Kafka 供下游消费
-//   - 日志收集：将应用日志推送到 Kafka（配合 sharklog 使用）
-//   - 实时流处理：作为 RisingWave / Flink 等流处理系统的数据源
-//
-// 使用示例：
-//
-//	// 1. 创建 SharkKafka 实例
-//	cfg := &sharkkafka.Config{
-//	    Host:     []string{"kafka-broker:9092"},
-//	    User:     "myuser",
-//	    Password: "mypassword",
-//	}
-//	sk, err := sharkkafka.New(ctx, cfg, logger)
-//	if err != nil {
-//	    log.Fatalf("创建 Kafka 实例失败: %v", err)
-//	}
-//	defer sk.Close()
-//
-//	// 2. 发送消息
-//	writer, _ := sk.Writer("order-events")
-//	writer.WriteMessages(ctx, kafka.Message{
-//	    Key:   []byte("order-12345"),
-//	    Value: []byte(`{"status":"created"}`),
-//	})
-//
-//	// 3. 消费消息
-//	sk.BatchConsumer("order-events", "order-consumer-group", func(msgs []kafka.Message) bool {
-//	    for _, msg := range msgs {
-//	        fmt.Println("收到消息:", string(msg.Value))
-//	    }
-//	    return true // 返回 false 停止消费
-//	})
+// Config 支持 SASL/SCRAM-SHA512 和 TLS；Writer 按 topic 缓存并使用 RequireOne 确认。
+// 批量消费者缓冲消息，处理后提交 offset；提交失败会重试至成功或上下文取消。
 package sharkkafka
 
 import (
@@ -51,9 +11,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/panjf2000/ants/v2"
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl/scram"
-	"github.com/xcodego/shark/sharkfunc"
+	"github.com/xcodego/shark/sharkutils"
 	"go.uber.org/zap"
 )
 
@@ -114,6 +75,7 @@ type SharkKafka struct {
 	lock    sync.Mutex               // 保护 writers map 的互斥锁
 	dialer  *kafka.Dialer            // 连接拨号器（nil = 全明文；非 nil 时包含 SASL 和/或 TLS 配置）
 	logger  *zap.Logger              // zap 日志记录器
+	antpool *ants.Pool
 }
 
 // New 创建一个 SharkKafka 实例。
@@ -214,58 +176,21 @@ func New(ctx context.Context, config *Config, logger *zap.Logger) (*SharkKafka, 
 		// 无 SASL 无 TLS，全明文
 		dialer = nil
 	}
-
+	antpool, err := ants.NewPool(10)
+	if err != nil {
+		return nil, err
+	}
 	return &SharkKafka{
 		ctx:     ctx,
 		config:  config,
 		writers: make(map[string]*kafka.Writer),
 		dialer:  dialer,
 		logger:  logger,
+		antpool: antpool,
 	}, nil
 }
 
-// Writer 获取或创建指定 topic 的 Kafka Writer（生产者）。
-//
-// Writer 采用池化设计：首次请求时创建并缓存，后续请求直接返回缓存的实例。
-// 该方法线程安全，通过互斥锁保护 writers map。
-//
-// Writer 配置（默认值）：
-//   - Balancer:     &kafka.Hash{}（按 Key 哈希分区）
-//   - BatchSize:    10000（单批最多 10000 条消息）
-//   - BatchBytes:   2MB（单批最多 2MB）
-//   - BatchTimeout: 1s（批次超时）
-//   - RequiredAcks: RequireOne（仅等待 Leader 确认，性能优先）
-//   - Async:        false（同步写入，保证消息不丢失）
-//
-// 参数：
-//   - topic: Kafka topic 名称
-//
-// 返回值：
-//   - *kafka.Writer: 可复用的 Writer 实例
-//   - error: 当前实现始终返回 nil（错误仅在 NewWriter 内部处理）
-//
-// 使用示例：
-//
-//	sk, _ := sharkkafka.New(ctx, cfg, logger)
-//
-//	// 获取 Writer（首次创建，后续复用）
-//	writer, err := sk.Writer("order-events")
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//
-//	// 发送单条消息
-//	err = writer.WriteMessages(ctx, kafka.Message{
-//	    Key:   []byte("order-12345"),
-//	    Value: []byte(`{"order_id":"12345","status":"created"}`),
-//	})
-//
-//	// 批量发送消息
-//	messages := []kafka.Message{
-//	    {Key: []byte("1"), Value: []byte(`{"data":"msg1"}`)},
-//	    {Key: []byte("2"), Value: []byte(`{"data":"msg2"}`)},
-//	}
-//	writer.WriteMessages(ctx, messages...)
+// WriterConfig 配置 Kafka writer 的批次大小、确认级别和写入模式。
 type WriterConfig struct {
 	BatchSize    *int                // 单批最多消息数 默认 10000
 	BatchBytes   *int                // 单批最大字节数 2MB
@@ -274,6 +199,7 @@ type WriterConfig struct {
 	Async        *bool               // 是否异步写入   true
 }
 
+// Writer 返回 topic 对应的 Kafka writer；未缓存时按 cfg 创建。
 func (s *SharkKafka) Writer(topic string, cfg *WriterConfig) (*kafka.Writer, error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
@@ -283,27 +209,27 @@ func (s *SharkKafka) Writer(topic string, cfg *WriterConfig) (*kafka.Writer, err
 	}
 	if cfg == nil {
 		cfg = &WriterConfig{
-			BatchSize:    sharkfunc.Pointer(10000),            // 单批最多 10000 条消息
-			BatchBytes:   sharkfunc.Pointer(1024 * 1024 * 2),  // 单批最多 2MB
-			BatchTimeout: sharkfunc.Pointer(time.Second),      // 批次超时 1s
-			RequiredAcks: sharkfunc.Pointer(kafka.RequireOne), // 仅等待 Leader 确认
-			Async:        sharkfunc.Pointer(true),             // 同步写入，保证消息不丢失
+			BatchSize:    sharkutils.Pointer(10000),            // 单批最多 10000 条消息
+			BatchBytes:   sharkutils.Pointer(1024 * 1024 * 2),  // 单批最多 2MB
+			BatchTimeout: sharkutils.Pointer(time.Second),      // 批次超时 1s
+			RequiredAcks: sharkutils.Pointer(kafka.RequireOne), // 仅等待 Leader 确认
+			Async:        sharkutils.Pointer(true),             // 同步写入，保证消息不丢失
 		}
 	}
 	if cfg.BatchSize == nil {
-		cfg.BatchSize = sharkfunc.Pointer(10000)
+		cfg.BatchSize = sharkutils.Pointer(10000)
 	}
 	if cfg.BatchBytes == nil {
-		cfg.BatchBytes = sharkfunc.Pointer(1024 * 1024 * 2)
+		cfg.BatchBytes = sharkutils.Pointer(1024 * 1024 * 2)
 	}
 	if cfg.BatchTimeout == nil {
-		cfg.BatchTimeout = sharkfunc.Pointer(time.Second)
+		cfg.BatchTimeout = sharkutils.Pointer(time.Second)
 	}
 	if cfg.RequiredAcks == nil {
-		cfg.RequiredAcks = sharkfunc.Pointer(kafka.RequireOne)
+		cfg.RequiredAcks = sharkutils.Pointer(kafka.RequireOne)
 	}
 	if cfg.Async == nil {
-		cfg.Async = sharkfunc.Pointer(true)
+		cfg.Async = sharkutils.Pointer(true)
 	}
 	// 未缓存：创建新的 Writer
 	writerConfig := kafka.WriterConfig{
@@ -374,59 +300,32 @@ func (s *SharkKafka) Close() error {
 	return firstErr
 }
 
-// Reader 创建一个 Kafka Reader（消费者）。
-//
-// 每次调用都创建新的 Reader 实例（不缓存），调用方负责调用 Close()。
-//
-// 参数：
-//   - topic: 要消费的 topic 名称
-//   - group: 消费者组 ID（同一组的消费者分摊消费分区）
-//
-// Reader 配置（默认值）：
-//   - MinBytes:    1（只要有数据就立即返回）
-//   - MaxBytes:    10MB（单次拉取最多 10MB）
-//   - StartOffset: FirstOffset（新消费者组从 topic 最早消息开始，会重放历史）
-//
-// 若不需要重放：不要用默认 FirstOffset。应另外创建 consumer，例如指定 LastOffset，
-// 或使用已经提交过 offset 的 group。
-//
-// 使用示例：
-//
-//	// 创建 Reader
-//	reader := sk.Reader("order-events", "order-consumer-group")
-//	defer reader.Close()
-//
-//	// 逐条消费
-//	for {
-//	    msg, err := reader.ReadMessage(ctx)
-//	    if err != nil {
-//	        log.Printf("读取消息失败: %v", err)
-//	        break
-//	    }
-//	    fmt.Printf("收到消息: key=%s value=%s\n", string(msg.Key), string(msg.Value))
-//	}
+// ReaderConfig 配置 Kafka reader 的拉取范围和起始 offset。
+// 默认 FirstOffset 会使新消费组从最早消息开始；不需要重放时请设置 LastOffset，
+// 或使用已有 offset 的消费组。
 type ReaderConfig struct {
 	MinBytes    *int   // 单次拉取的最小字节数（低延迟）默认 1
 	MaxBytes    *int   // 单次拉取的最大字节数（高吞吐）默认 10MB
 	StartOffset *int64 // 默认 FirstOffset：新 group 重放历史；不需要重放须另建 consumer（LastOffset 或已有 offset 的 group）
 }
 
+// Reader 为 topic 和消费组创建 Kafka reader。
 func (s *SharkKafka) Reader(topic string, group string, cfg *ReaderConfig) *kafka.Reader {
 	if cfg == nil {
 		cfg = &ReaderConfig{
-			MinBytes:    sharkfunc.Pointer(1),                 // 有数据就返回（低延迟）
-			MaxBytes:    sharkfunc.Pointer(10 * 1024 * 1024),  // 单次最多返回 10MB
-			StartOffset: sharkfunc.Pointer(kafka.FirstOffset), // 新 group 从最早消息开始（会重放）；不重放须另建 consumer
+			MinBytes:    sharkutils.Pointer(1),                 // 有数据就返回（低延迟）
+			MaxBytes:    sharkutils.Pointer(10 * 1024 * 1024),  // 单次最多返回 10MB
+			StartOffset: sharkutils.Pointer(kafka.FirstOffset), // 新 group 从最早消息开始（会重放）；不重放须另建 consumer
 		}
 	}
 	if cfg.MinBytes == nil {
-		cfg.MinBytes = sharkfunc.Pointer(1)
+		cfg.MinBytes = sharkutils.Pointer(1)
 	}
 	if cfg.MaxBytes == nil {
-		cfg.MaxBytes = sharkfunc.Pointer(10 * 1024 * 1024)
+		cfg.MaxBytes = sharkutils.Pointer(10 * 1024 * 1024)
 	}
 	if cfg.StartOffset == nil {
-		cfg.StartOffset = sharkfunc.Pointer(kafka.FirstOffset)
+		cfg.StartOffset = sharkutils.Pointer(kafka.FirstOffset)
 	}
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:           s.config.Host,
@@ -444,87 +343,41 @@ func (s *SharkKafka) Reader(topic string, group string, cfg *ReaderConfig) *kafk
 	return reader
 }
 
-// BatchConsumer 启动批量消费者，自动拉取、缓冲、提交 offset。
-//
-// 默认 StartOffset=FirstOffset：新 group 从最早消息消费（重放历史）。
-// 若不需要重放，应另外创建 consumer（指定 LastOffset，或使用已经提交过 offset 的 group）。
-//
-// 工作流程：
-//  1. 创建 Reader 并启动拉取协程，将消息推入带缓冲的 channel
-//  2. 消费协程每批最多拉取 10000 条消息，调用 handler 处理
-//  3. handler 返回 true → 提交 offset 并继续；返回 false / panic → 停止消费
-//  4. offset 提交失败会一直重试（每次超时 1 秒），直到成功或 ctx 取消
-//
-// 停止条件：
-//   - handler 返回 false
-//   - handler 内部 panic（捕获后停止）
-//   - ctx 被取消
-//   - offset 提交在 ctx 取消前始终失败（循环上限极大，实际等价于一直重试）
-//
-// 参数：
-//   - topic:   要消费的 topic 名称
-//   - group:   消费者组 ID
-//   - handler: 批量消息处理函数。参数为消息切片，返回 true 继续消费，false 停止消费
-//
-// 使用示例：
-//
-//	sk, _ := sharkkafka.New(ctx, cfg, logger)
-//
-//	// 启动批量消费者（阻塞直到 handler 返回 false 或 ctx 取消）
-//	sk.BatchConsumer("order-events", "order-processor", func(msgs []kafka.Message) bool {
-//	    for _, msg := range msgs {
-//	        var order Order
-//	        if err := json.Unmarshal(msg.Value, &order); err != nil {
-//	            logger.Error("消息解析失败", zap.Error(err))
-//	            continue
-//	        }
-//	        processOrder(order)
-//	    }
-//	    return true // 继续消费
-//	})
-//
-//	// 带停止条件的消费
-//	var count int
-//	sk.BatchConsumer("events", "counter-group", func(msgs []kafka.Message) bool {
-//	    count += len(msgs)
-//	    if count >= 10000 {
-//	        logger.Info("已达到处理上限，停止消费")
-//	        return false // 停止消费
-//	    }
-//	    return true
-//	})
+// BatchConfig 配置批量消费者的拉取和批处理行为。
+// handler 返回 true 时提交当前批次并继续；返回 false 时停止消费。
 type BatchConfig struct {
 	ReaderConfig
 	BatchSize *int           // 每批处理的最大消息数，默认 10000
 	Timeout   *time.Duration // 批次处理超时时间，默认 0 立即返回
 }
 
+// BatchConsumer 按批消费消息；handler 返回 false 时停止消费。
 func (s *SharkKafka) BatchConsumer(topic string, group string, cfg *BatchConfig, handler func([]kafka.Message) bool) {
 	if cfg == nil {
 		cfg = &BatchConfig{
 			ReaderConfig: ReaderConfig{
-				MinBytes:    sharkfunc.Pointer(1),                 // 有数据就返回（低延迟）
-				MaxBytes:    sharkfunc.Pointer(10 * 1024 * 1024),  // 单次最多返回 10MB
-				StartOffset: sharkfunc.Pointer(kafka.FirstOffset), // 新 group 从最早消息开始（会重放）；不重放须另建 consumer
+				MinBytes:    sharkutils.Pointer(1),                 // 有数据就返回（低延迟）
+				MaxBytes:    sharkutils.Pointer(10 * 1024 * 1024),  // 单次最多返回 10MB
+				StartOffset: sharkutils.Pointer(kafka.FirstOffset), // 新 group 从最早消息开始（会重放）；不重放须另建 consumer
 			},
-			BatchSize: sharkfunc.Pointer(10000),            // 每批处理的最大消息数，默认  10000
-			Timeout:   sharkfunc.Pointer(time.Duration(0)), // 批次处理超时时间，默认 0 立即返回
+			BatchSize: sharkutils.Pointer(10000),            // 每批处理的最大消息数，默认  10000
+			Timeout:   sharkutils.Pointer(time.Duration(0)), // 批次处理超时时间，默认 0 立即返回
 		}
 	}
 	if cfg.MinBytes == nil {
-		cfg.MinBytes = sharkfunc.Pointer(1)
+		cfg.MinBytes = sharkutils.Pointer(1)
 	}
 	if cfg.MaxBytes == nil {
-		cfg.MaxBytes = sharkfunc.Pointer(10 * 1024 * 1024)
+		cfg.MaxBytes = sharkutils.Pointer(10 * 1024 * 1024)
 	}
 	if cfg.StartOffset == nil {
-		cfg.StartOffset = sharkfunc.Pointer(kafka.FirstOffset)
+		cfg.StartOffset = sharkutils.Pointer(kafka.FirstOffset)
 	}
 	if cfg.BatchSize == nil {
-		cfg.BatchSize = sharkfunc.Pointer(10000)
+		cfg.BatchSize = sharkutils.Pointer(10000)
 	}
 	if cfg.Timeout == nil {
-		cfg.Timeout = sharkfunc.Pointer(time.Duration(0))
+		cfg.Timeout = sharkutils.Pointer(time.Duration(0))
 	}
 	reader := s.Reader(topic, group, &cfg.ReaderConfig)
 	batchSize := *cfg.BatchSize
@@ -552,7 +405,7 @@ func (s *SharkKafka) BatchConsumer(topic string, group string, cfg *BatchConfig,
 	go func() {
 		for {
 			// 批量排空 channel，最多取 batchSize 条
-			messages, err := sharkfunc.DrainChannelN(running, channel, batchSize, *cfg.Timeout)
+			messages, err := sharkutils.DrainChannelN(running, channel, batchSize, *cfg.Timeout)
 			if err != nil {
 				// channel 为空且上下文已取消 → 正常退出
 				return
@@ -568,7 +421,7 @@ func (s *SharkKafka) BatchConsumer(topic string, group string, cfg *BatchConfig,
 			// 提交 offset 一直重试,直到成功
 			var commitError error
 			for i := 0; i < 50000000; i++ {
-				commitError = sharkfunc.WithTimeout(running, time.Second, func(ctx context.Context) error {
+				commitError = sharkutils.WithTimeout(s.antpool, running, time.Second, func(ctx context.Context) error {
 					return reader.CommitMessages(ctx, messages...)
 				})
 				if commitError == nil {

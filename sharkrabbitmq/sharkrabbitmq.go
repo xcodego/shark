@@ -26,7 +26,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/howeyc/crc16"
 	amqp "github.com/rabbitmq/amqp091-go"
-	"github.com/xcodego/shark/sharkfunc"
+	"github.com/xcodego/shark/sharkutils"
 	"go.uber.org/zap"
 )
 
@@ -365,48 +365,25 @@ func (c *Client) handle_channel(channel <-chan amqp.Delivery, handler func(amqp.
 	}
 }
 
-// BatchConsume 批量消费消息，handler 返回 false 或 panic 停止处理且不 ack 消息。
-//
-// 每批最多聚合（使用 DrainChannelN），
-// handler 返回 true 时统一 ack 整批消息，返回 false 时不 ack。
-// handler 中不应手动 ack 消息。
-//
-// 使用示例:
-//
-//	client.BatchConsume("my-exchange", "my-queue", "my-key",
-//	    func(msgs []amqp.Delivery) bool {
-//	        for _, msg := range msgs {
-//	            if err := process(msg.Body); err != nil {
-//	                return false // 停止处理，不 ack
-//	            }
-//	        }
-//	        return true // 整批 ack
-//	    },
-//	)
-//
-// 参数:
-//   - exchange: 交换机名称
-//   - queue: 队列名称
-//   - key: 路由键
-//   - batchSize: 每批处理的最大消息数
-//   - handler: 批量消息处理函数，返回 true 表示整批 ack
+// BatchConsumeConfig 配置每批消息数和批次等待时间。
 type BatchConsumeConfig struct {
 	BatchSize *int           // 每批处理的最大消息数，默认 10000
 	Timeout   *time.Duration // 批次处理超时时间，默认 0 立即返回
 }
 
+// BatchConsume 按批读取 queue 中的消息；handler 返回 true 时确认整批，false 时不确认。
 func (c *Client) BatchConsume(exchange string, queue string, key string, cfg *BatchConsumeConfig, handler func([]amqp.Delivery) bool) {
 	if cfg == nil {
 		cfg = &BatchConsumeConfig{
-			BatchSize: sharkfunc.Pointer(10000),
-			Timeout:   sharkfunc.Pointer(time.Duration(0)),
+			BatchSize: sharkutils.Pointer(10000),
+			Timeout:   sharkutils.Pointer(time.Duration(0)),
 		}
 	}
 	if cfg.BatchSize == nil {
-		cfg.BatchSize = sharkfunc.Pointer(10000)
+		cfg.BatchSize = sharkutils.Pointer(10000)
 	}
 	if cfg.Timeout == nil {
-		cfg.Timeout = sharkfunc.Pointer(time.Duration(0))
+		cfg.Timeout = sharkutils.Pointer(time.Duration(0))
 	}
 	batchSize := *cfg.BatchSize
 	go func() {
@@ -472,7 +449,7 @@ func (c *Client) BatchConsume(exchange string, queue string, key string, cfg *Ba
 			}
 			for {
 				// 批量收集消息
-				messages, err := sharkfunc.DrainChannelN(ctx, drainChannel, batchSize, *cfg.Timeout)
+				messages, err := sharkutils.DrainChannelN(ctx, drainChannel, batchSize, *cfg.Timeout)
 				if err != nil {
 					cancel()
 					break

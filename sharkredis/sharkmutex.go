@@ -8,6 +8,7 @@ import (
 	"github.com/go-redsync/redsync/v4"
 )
 
+// SharkMutex 是可配置的 Redis 分布式互斥锁。
 type SharkMutex struct {
 	mutex      *redsync.Redsync
 	key        string
@@ -18,21 +19,25 @@ type SharkMutex struct {
 	locker     sync.Mutex
 }
 
+// Expire 设置锁的过期时间。
 func (o *SharkMutex) Expire(expire time.Duration) *SharkMutex {
 	o.expire = &expire
 	return o
 }
 
+// WithRetryDelay 设置两次加锁尝试之间的间隔。
 func (o *SharkMutex) WithRetryDelay(retryDelay time.Duration) *SharkMutex {
 	o.retryDelay = &retryDelay
 	return o
 }
 
+// WithTries 设置加锁的最大尝试次数。
 func (o *SharkMutex) WithTries(tries int) *SharkMutex {
 	o.trys = &tries
 	return o
 }
 
+// Lock 获取分布式锁。
 func (o *SharkMutex) Lock() error {
 	o.locker.Lock()
 	defer o.locker.Unlock()
@@ -54,6 +59,7 @@ func (o *SharkMutex) Lock() error {
 	return o.instance.Lock()
 }
 
+// Unlock 释放分布式锁，并返回释放状态。
 func (o *SharkMutex) Unlock() (bool, error) {
 	o.locker.Lock()
 	defer o.locker.Unlock()

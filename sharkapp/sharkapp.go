@@ -34,10 +34,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/howeyc/crc16"
+	"github.com/panjf2000/ants/v2"
 	"github.com/xcodego/shark/sharkdb"
 	"github.com/xcodego/shark/sharkelastic"
 	"github.com/xcodego/shark/sharketcd"
-	"github.com/xcodego/shark/sharkfunc"
 	"github.com/xcodego/shark/sharkgrpc"
 	"github.com/xcodego/shark/sharkhttp"
 	"github.com/xcodego/shark/sharkkafka"
@@ -46,6 +46,7 @@ import (
 	"github.com/xcodego/shark/sharkrabbitmq"
 	"github.com/xcodego/shark/sharkredis"
 	"github.com/xcodego/shark/sharkrisingwave"
+	"github.com/xcodego/shark/sharkutils"
 	"github.com/xcodego/shark/sharkws"
 
 	"github.com/xcodego/shark/sharklog"
@@ -128,6 +129,9 @@ type App struct {
 	GinEngine *gin.Engine
 	// SharkWS WebSocket 服务组件
 	Ws *sharkws.SharkWS
+	// AntPool ants 池，用于管理高并发 goroutine
+	// 默认大小由 options.antpool 决定，若为 0 则使用默认值 100
+	AntPool *ants.Pool
 
 	// --- 内部组件（不对外暴露） ---
 	// cancelFunc 取消 Context，触发优雅关闭
@@ -181,6 +185,17 @@ func New(options *Options) (*App, error) {
 		Sg:         &singleflight.Group{},
 	}
 
+	// 初始化 ants 池
+	antPoolSize := options.antpool
+	if antPoolSize == 0 {
+		antPoolSize = 100
+	}
+	pool, err := ants.NewPool(antPoolSize)
+	if err != nil {
+		return nil, fmt.Errorf("创建 ants 池失败: %w", err)
+	}
+	app.AntPool = pool
+
 	// 初始化日志组件
 	app.sharklog = sharklog.New(app.Context, app.Name, app.Id)
 	app.Logger = app.sharklog.Zap
@@ -200,7 +215,7 @@ func New(options *Options) (*App, error) {
 		if app.Env == "dev" || app.Env == "test" {
 			topic := fmt.Sprintf("%v_game_log_%v", app.Project, app.Env)
 			kafkaLogWriter, err := app.Kafka.Writer(topic, &sharkkafka.WriterConfig{
-				Async: sharkfunc.Pointer(true), // 异步写入 Kafka，避免阻塞业务日志
+				Async: sharkutils.Pointer(true), // 异步写入 Kafka，避免阻塞业务日志
 			})
 			if err != nil {
 				app.Logger.Warn("创建Kafka日志Writer失败，日志仅输出到控制台", zap.Error(err))

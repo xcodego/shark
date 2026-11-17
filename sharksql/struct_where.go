@@ -273,7 +273,7 @@ func indexIgnoreCase(s string, substr string) int {
 	return strings.Index(s, strings.ToUpper(substr))
 }
 
-// ToUpdate 根据结构体字段生成 UPDATE SET 列的 map[string]any。
+// ToUpdateData 根据结构体字段生成 UPDATE SET 列的 map[string]any。
 //
 // 规则：
 //   - 只处理指针字段（*T, *[]T, *map[K]V），其他类型忽略

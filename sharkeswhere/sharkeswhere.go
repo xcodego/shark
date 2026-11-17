@@ -78,6 +78,7 @@ type aggExprPart struct {
 // Build
 // ---------------------------------------------------------------------------
 
+// Build 将支持的 SQL 风格查询解析为 Elasticsearch 查询条件。
 func Build(where string) (*ParsedQuery, error) {
 	input := strings.TrimSpace(where)
 	if input == "" {
@@ -740,11 +741,13 @@ func parseInt(s string) (int, bool) {
 // 公开类型
 // ---------------------------------------------------------------------------
 
+// Token 表示 SQL 风格查询中的一个词法单元。
 type Token struct {
 	Typ string
 	Val string
 }
 
+// Tokenize 将 Elasticsearch SQL 风格查询切分为 token。
 func Tokenize(input string) ([]Token, error) {
 	tokens, err := tokenize(input)
 	if err != nil {
@@ -760,6 +763,7 @@ func Tokenize(input string) ([]Token, error) {
 	return result, nil
 }
 
+// ParseValue 将查询字面量转换为对应的 Go 值。
 func ParseValue(s string) any {
 	return parseValue(s)
 }

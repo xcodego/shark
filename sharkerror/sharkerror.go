@@ -1,33 +1,6 @@
 // Package sharkerror 提供了统一的业务错误类型。
 //
-// Error 是一个轻量级的错误结构体，包含错误码、错误消息和可选的附加数据，
-// 主要设计目标:
-//   - 统一 API 错误格式（code + msg + data），方便前端统一处理
-//   - 支持 errors.Is 判断（基于 Code 比较），适用于错误分级处理
-//   - 链式调用 WithXxx 方法追加附加信息，不修改原实例（不可变性）
-//
-// JSON 序列化后格式:
-//
-//	{
-//	  "code": 10001,
-//	  "msg": "用户不存在",
-//	  "data": null
-//	}
-//
-// 使用示例:
-//
-//	var ErrUserNotFound = sharkerror.New(10001, "用户不存在")
-//
-//	// 判断错误类型
-//	if errors.Is(err, ErrUserNotFound) {
-//	    // 处理用户不存在
-//	}
-//
-//	// 附加数据
-//	err := ErrUserNotFound.WithData(map[string]any{"user_id": 123})
-//	// 附加原始错误
-//	err := someFunc() // 返回 *Error
-//	err = err.WithErr(originalErr)
+// Error 包含错误码、消息和可选数据，支持 errors.Is 和链式附加信息。
 package sharkerror
 
 import (

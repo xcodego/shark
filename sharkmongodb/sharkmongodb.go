@@ -1,51 +1,6 @@
 // Package sharkmongodb 提供了 MongoDB 客户端的创建和连接管理。
 //
-// 封装了 MongoDB Go Driver v2 的连接创建、认证配置和健康检查，
-// 为 Shark 应用提供开箱即用的 MongoDB 连接能力。
-//
-// 连接 URI 格式：mongodb://user:password@host/?authSource=admin
-// 认证源固定为 admin 数据库，适用于大多数 MongoDB 部署场景。
-//
-// 使用示例：
-//
-//	// 创建 MongoDB 客户端
-//	client, err := sharkmongodb.New(ctx, &sharkmongodb.Config{
-//	    Host:     "127.0.0.1:27017",
-//	    User:     "admin",
-//	    Password: "password",
-//	})
-//	if err != nil {
-//	    log.Fatalf("连接 MongoDB 失败: %v", err)
-//	}
-//	defer client.Disconnect(ctx)
-//
-//	// 使用客户端操作数据库
-//	coll := client.Database("mydb").Collection("users")
-//
-//	// 插入文档
-//	_, err = coll.InsertOne(ctx, bson.D{
-//	    {Key: "name", Value: "张三"},
-//	    {Key: "age", Value: 25},
-//	    {Key: "email", Value: "zhangsan@example.com"},
-//	})
-//
-//	// 查询文档
-//	var result struct {
-//	    Name  string `bson:"name"`
-//	    Age   int    `bson:"age"`
-//	    Email string `bson:"email"`
-//	}
-//	err = coll.FindOne(ctx, bson.D{{Key: "name", Value: "张三"}}).Decode(&result)
-//	fmt.Printf("用户: %s, 年龄: %d\n", result.Name, result.Age)
-//
-//	// 更新文档
-//	coll.UpdateOne(ctx,
-//	    bson.D{{Key: "name", Value: "张三"}},
-//	    bson.D{{Key: "$set", Value: bson.D{{Key: "age", Value: 26}}}},
-//	)
-//
-//	// 删除文档
-//	coll.DeleteOne(ctx, bson.D{{Key: "name", Value: "张三"}})
+// 使用 MongoDB Go Driver v2 创建并检查连接，认证源固定为 admin 数据库。
 package sharkmongodb
 
 import (

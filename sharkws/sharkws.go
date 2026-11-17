@@ -1,17 +1,7 @@
 // Package sharkws 提供挂在 Gin 上的 WebSocket 连接管理。
 //
-// 设计约定（业务必须遵守，框架不做背压丢弃）：
-//
-//	所有连接共用 send_channel / recv_channel（各缓冲 10000）。通道满时发送方会阻塞。
-//	读循环把消息打进 recv_channel；OnConnect / OnMessage / OnClose 在同一条 recv 协程里同步执行。
-//	回调里如果阻塞（慢逻辑、再调 Send 且 send 通道已满），recv 协程卡住 → 通道堆满 →
-//	ReadMessage 循环阻塞，连接像假死。
-//
-//	因此：回调必须尽快返回，重活丢到业务自己的 goroutine；不要在回调里做会堵很久的 Send/Broadcast。
-//
-//	Close() 会直接 Conn.Close()，与 send 协程的 WriteMessage 可能并发。
-//	gorilla 不允许对同一连接并发写/关。业务应避免对同一 conn 边 Close 边 Send；
-//	主动 Close 后不要再对该 id 发送。
+// 连接共用带缓冲的收发队列，回调在同一接收协程中同步运行；队列满或回调阻塞会暂停读取。
+// 回调应尽快返回，耗时任务放到业务 goroutine。避免对同一连接并发调用 Close 和 Send。
 package sharkws
 
 import (
@@ -32,6 +22,7 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+// SharkWS 管理 Gin 路由上的 WebSocket 连接和消息回调。
 type SharkWS struct {
 	index                    atomic.Int64
 	router                   *gin.Engine
@@ -45,6 +36,7 @@ type SharkWS struct {
 	looping                  bool
 }
 
+// Connection 保存 WebSocket 连接、路由参数、查询参数和客户端 IP。
 type Connection struct {
 	Conn   *websocket.Conn
 	Params map[string]string
@@ -52,6 +44,7 @@ type Connection struct {
 	Ip     string
 }
 
+// NewSharkWS 创建 WebSocket 管理器并启动收发队列处理协程。
 func NewSharkWS(router *gin.Engine) *SharkWS {
 	ws := &SharkWS{
 		router:       router,
@@ -109,6 +102,7 @@ func NewSharkWS(router *gin.Engine) *SharkWS {
 	return ws
 }
 
+// Listen 将 path 注册为 WebSocket 路由。
 func (s *SharkWS) Listen(path string) {
 	s.router.GET(path, func(c *gin.Context) {
 		wsconn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -156,6 +150,7 @@ func (s *SharkWS) Listen(path string) {
 	})
 }
 
+// GetConnects 返回当前连接 ID 列表。
 func (s *SharkWS) GetConnects() []int {
 	conns := []int{}
 	s.connects.Range(func(key, value interface{}) bool {
@@ -165,10 +160,12 @@ func (s *SharkWS) GetConnects() []int {
 	return conns
 }
 
+// OnConnect 设置 path 对应的连接建立回调。
 func (s *SharkWS) OnConnect(path string, callback func(conn int)) {
 	s.connect_callback.Store(path, callback) // 在 recv 协程同步执行，必须尽快返回
 }
 
+// RemoteIp 返回客户端 IP；连接不存在时返回空字符串。
 func (s *SharkWS) RemoteIp(conn int) string {
 	c, ok := s.connects.Load(conn)
 	if !ok {
@@ -178,6 +175,7 @@ func (s *SharkWS) RemoteIp(conn int) string {
 	return connection.Ip
 }
 
+// Param 返回路由参数；连接或参数不存在时返回空字符串。
 func (s *SharkWS) Param(conn int, key string) string {
 	c, ok := s.connects.Load(conn)
 	if !ok {
@@ -187,6 +185,7 @@ func (s *SharkWS) Param(conn int, key string) string {
 	return connection.Params[key]
 }
 
+// Query 返回查询参数；连接或参数不存在时返回空字符串。
 func (s *SharkWS) Query(conn int, key string) string {
 	c, ok := s.connects.Load(conn)
 	if !ok {
@@ -197,6 +196,7 @@ func (s *SharkWS) Query(conn int, key string) string {
 	return connection.Query.Get(key)
 }
 
+// Close 关闭并移除指定连接；关闭后不要再向该连接发送消息。
 func (s *SharkWS) Close(conn int) {
 	c, ok := s.connects.Load(conn)
 	if !ok {
@@ -208,14 +208,17 @@ func (s *SharkWS) Close(conn int) {
 	connection.Conn.Close()
 }
 
+// OnClose 设置 path 的断开回调；主动调用 Close 不会触发该回调。
 func (s *SharkWS) OnClose(path string, callback func(conn int)) {
 	s.close_callback.Store(path, callback) // 被动断开时在 recv 协程执行，必须尽快返回
 }
 
+// OnMessage 设置 path 的消息回调。
 func (s *SharkWS) OnMessage(path string, callback func(conn int, message []byte)) {
 	s.message_callback.Store(path, callback) // 在 recv 协程同步执行，必须尽快返回
 }
 
+// DefaultMessage 设置未配置 path 专属回调时使用的默认消息回调。
 func (s *SharkWS) DefaultMessage(callback func(conn int, path string, message []byte)) {
 	if callback == nil {
 		return
@@ -223,6 +226,7 @@ func (s *SharkWS) DefaultMessage(callback func(conn int, path string, message []
 	s.default_message_callback.Store(callback) // 在 recv 协程同步执行，必须尽快返回
 }
 
+// SendText 将文本消息加入发送队列；队列满时会阻塞。
 func (s *SharkWS) SendText(conn int, text string) {
 	_, ok := s.connects.Load(conn)
 	if !ok {
@@ -231,6 +235,7 @@ func (s *SharkWS) SendText(conn int, text string) {
 	s.send_channel <- []any{conn, websocket.TextMessage, []byte(text)} // 通道满会阻塞调用方
 }
 
+// SendBytes 将二进制消息加入发送队列；队列满时会阻塞。
 func (s *SharkWS) SendBytes(conn int, data []byte) {
 	_, ok := s.connects.Load(conn)
 	if !ok {
@@ -239,6 +244,7 @@ func (s *SharkWS) SendBytes(conn int, data []byte) {
 	s.send_channel <- []any{conn, websocket.BinaryMessage, data} // 通道满会阻塞调用方
 }
 
+// BroadcastText 向当前所有连接广播文本消息。
 func (s *SharkWS) BroadcastText(text string) {
 	conns := s.GetConnects()
 	for _, conn := range conns {
@@ -246,6 +252,7 @@ func (s *SharkWS) BroadcastText(text string) {
 	}
 }
 
+// BroadcastBytes 向当前所有连接广播二进制消息。
 func (s *SharkWS) BroadcastBytes(data []byte) {
 	conns := s.GetConnects()
 	for _, conn := range conns {

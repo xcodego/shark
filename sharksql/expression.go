@@ -514,6 +514,7 @@ func Negative(column string) string {
 	return "-" + column
 }
 
+// GormAs 构造 GORM SELECT 子句使用的子查询别名表达式。
 func GormAs(alias string, v *gorm.DB) (string, *gorm.DB) {
 	return fmt.Sprintf("(?) AS %v", alias), v
 }

@@ -1,3 +1,4 @@
+// Package sharkelastic 提供 Elasticsearch 客户端及 SQL 风格查询辅助函数。
 package sharkelastic
 
 import (

@@ -19,8 +19,6 @@ import (
 
 // swag init --parseDependency -g  main.go
 
-// test the application1
-
 func main() {
 	options, err := sharkapp.NewOption("kgame", "game-test")
 	if err != nil {
@@ -33,9 +31,11 @@ func main() {
 	app.Hunt(&Test{svc: app})
 }
 
+// Test is the example application's service.
 type Test struct {
 	svc *sharkapp.App
 }
 
+// Start is called when the application starts.
 func (t *Test) Start() {
 }

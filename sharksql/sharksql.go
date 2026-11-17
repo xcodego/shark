@@ -1,46 +1,8 @@
 // Package sharksql 提供 SQL 条件构建器和常用数据库操作辅助函数。
 //
-// 核心功能：
-//  1. 条件构建器：一组链式函数，将 Go 表达式转换为参数化的 SQL WHERE 条件片段
-//  2. 聚合函数构建器：Sum/Count/Avg/Max/Min 及其带别名的变体
-//  3. 排序构建器：Asc/Desc 生成 ORDER BY 子句
-//  4. JSON 操作：MySQL JSON 函数封装（JSON_SEARCH、JSON_CONTAINS、JSON_ARRAY_APPEND、JSON_SET）
-//  5. 分页查询：泛型分页函数 PageQuery，自动计算 total + offset + limit
-//  6. 工具函数：重复键检测、JSON 路径构建、表名.列名拼接
-//
-// 设计理念：
-//   - 全部函数返回参数化条件（条件字符串 + 参数值），天然防止 SQL 注入
-//   - 条件函数与 GORM 的 Where()/Having() 等方法无缝配合
-//   - 泛型分页函数 PageQuery 支持任意 GORM 模型类型
-//
-// 文件结构：
-//   - condition.go   — 条件构建器 (Eq/Neq/Gt/Gte/Lt/Lte/Like/In/IsNull 等)
-//   - aggregate.go   — 聚合函数 (Count/Sum/Avg/Max/Min 及 As 变体)
-//   - expression.go  — 表达式辅助 (As/Paren/Coalesce/IfNull/Case/When/Distinct/Column)
-//   - json.go        — MySQL JSON 函数 (JsonExtract/JsonContains/JsonSet 等)
-//   - join.go        — JOIN 子句构建 (LeftJoin/InnerJoin)
-//   - builder.go     — SqlBuilder 流式 API 条件构建器
-//   - struct_where.go — Where/ToUpdate (反射结构体自动生成条件)
-//   - pagination.go  — PageQuery 泛型分页
-//
-// 使用示例：
-//
-//	import "github.com/xcodego/shark/sharksql"
-//
-//	// 构建查询条件
-//	db.Where(
-//	    sharksql.Eq("status", 1),
-//	    sharksql.Gte("age", 18),
-//	    sharksql.Like("name", "张三"),
-//	).Find(&users)
-//
-//	// 分页查询
-//	users, total, err := sharksql.PageQuery[User](db, 1, 20)
-//
-//	// JSON 字段操作
-//	db.Update("tags", gorm.Expr(
-//	    sharksql.JsonArrayAppend("tags", "new_tag"),
-//	))
+// It provides parameterized conditions, SQL expressions, joins, JSON helpers,
+// and GORM pagination utilities. Use the condition helpers with GORM's Where or Having
+// methods to keep values separate from SQL text.
 package sharksql
 
 import (
@@ -51,7 +13,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// IsDuplicateKey 判断错误是否为 MySQL 的重复键错误（错误码 1062）。
+// IsDuplicateKeyError 判断 err 是否为 MySQL 重复键错误（错误码 1062）。
 //
 // 常用于 INSERT 操作的幂等性处理：检测到重复键时返回已有记录或忽略。
 //
@@ -87,6 +49,7 @@ func IsDuplicateKeyError(err error, key ...string) bool {
 	return false
 }
 
+// IsNotFoundError 判断 err 是否为 gorm.ErrRecordNotFound。
 func IsNotFoundError(err error) bool {
 	if err == nil {
 		return false
@@ -94,30 +57,35 @@ func IsNotFoundError(err error) bool {
 	return errors.Is(err, gorm.ErrRecordNotFound)
 }
 
+// ToFindSql 返回 GORM 为 Find 生成的 SQL，不执行查询。
 func ToFindSql(db *gorm.DB) string {
 	tx := db.Session(&gorm.Session{DryRun: true}).Find(nil)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 	return sql
 }
 
+// ToUpdateSql 返回 GORM 为 Update 生成的 SQL，不执行更新。
 func ToUpdateSql(db *gorm.DB) string {
 	tx := db.Session(&gorm.Session{DryRun: true}).Update("dummy", "dummy")
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 	return sql
 }
 
+// ToDeleteSql 返回 GORM 为 Delete 生成的 SQL，不执行删除。
 func ToDeleteSql(db *gorm.DB) string {
 	tx := db.Session(&gorm.Session{DryRun: true}).Delete(nil)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 	return sql
 }
 
+// ToInsertSql 返回 GORM 为 Create 生成的 SQL，不执行插入。
 func ToInsertSql(db *gorm.DB) string {
 	tx := db.Session(&gorm.Session{DryRun: true}).Create(nil)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 	return sql
 }
 
+// ToTakeSql 返回 GORM 为 Take 生成的 SQL，不执行查询。
 func ToTakeSql(db *gorm.DB) string {
 	tx := db.Session(&gorm.Session{DryRun: true}).Take(nil)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)

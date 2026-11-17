@@ -43,6 +43,7 @@ func NewTable(db *gorm.DB) *SharkTable {
 	return &SharkTable{db: db}
 }
 
+// NewTableWithReq 创建 SharkTable，并按 req 构建查询条件。
 func NewTableWithReq(db *gorm.DB, req any) *SharkTable {
 	sql, args := sharksql.Where(req)
 	db = db.Where(sql, args...)
@@ -689,36 +690,42 @@ func (t *SharkTable) Or(builder ...*sharksql.SqlBuilder) *SharkTable {
 	return t
 }
 
+// ToFindSql 返回 Find 操作生成的 SQL，不执行查询。
 func (t *SharkTable) ToFindSql() string {
 	tx := t.db.Session(&gorm.Session{DryRun: true}).Find(nil)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 	return sql
 }
 
+// ToCountSql 返回 Count 操作生成的 SQL，不执行查询。
 func (t *SharkTable) ToCountSql() string {
 	tx := t.db.Session(&gorm.Session{DryRun: true}).Count(nil)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 	return sql
 }
 
+// ToDeleteSql 返回 Delete 操作生成的 SQL，不执行查询。
 func (t *SharkTable) ToDeleteSql() string {
 	tx := t.db.Session(&gorm.Session{DryRun: true}).Delete(nil)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 	return sql
 }
 
+// ToUpdateSql 返回 Updates 操作生成的 SQL，不执行更新。
 func (t *SharkTable) ToUpdateSql(values any) string {
 	tx := t.db.Session(&gorm.Session{DryRun: true}).Updates(values)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 	return sql
 }
 
+// ToInsertSql 返回 Create 操作生成的 SQL，不执行插入。
 func (t *SharkTable) ToInsertSql(values any) string {
 	tx := t.db.Session(&gorm.Session{DryRun: true}).Create(values)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 	return sql
 }
 
+// ToTakeSql 返回 Take 操作生成的 SQL，不执行查询。
 func (t *SharkTable) ToTakeSql() string {
 	tx := t.db.Session(&gorm.Session{DryRun: true}).Take(nil)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)

@@ -1,46 +1,6 @@
-// Package sharkredis 提供了 Redis 客户端（集群/单机模式）的创建和连接管理。
-//
-// # 功能概述
-//
-// 本包封装了 go-redis v9 的集群客户端（ClusterClient）和单机客户端（Client）的创建，
-// 提供统一配置入口，简化 Redis 连接的初始化和维护。
-//
-// # 核心能力
-//
-//   - 双模式支持：通过 NewCluster 创建集群模式，NewClient 创建单机/主从模式。
-//   - 自定义 Dialer：支持在容器化环境中替换地址（如 Kubernetes Service IP → Pod IP），
-//     通过 Config.ReplaceFrom / ReplaceTo 实现。
-//   - 统一连接池配置：可配置空闲连接数、最大连接数、超时时间、重试策略等。
-//   - 连接健康检查：创建客户端时自动执行 Ping 验证，确保连接可用。
-//   - 辅助工具：helper.go 提供 Helper 结构体，封装常用的对象存取、批量扫描、批量删除等操作。
-//
-// # 配置加载
-//
-// Config 结构体支持 JSON、YAML 及 viper mapstructure 标签，可配合 viper、配置中心使用：
-//
-//	viper.UnmarshalKey("redis", &config)
-//
-// # 快速开始
-//
-// 集群模式：
-//
-//	cluster, err := sharkredis.NewCluster(ctx, &sharkredis.Config{
-//	    Host:     []string{"127.0.0.1:6379", "127.0.0.1:6380"},
-//	    Password: "pwd",
-//	})
-//
-// 单机模式：
-//
-//	client, err := sharkredis.NewClient(ctx, &sharkredis.Config{
-//	    Host:     []string{"127.0.0.1:6379"},
-//	    Password: "pwd",
-//	})
-//
-// 高级用法（Helper 对象存取）：
-//
-//	helper := sharkredis.NewHelperWithClient(client)
-//	err = helper.SetObject(ctx, "user:1001", user, time.Hour).Err()
-//	err = helper.GetObject(ctx, "user:1001", &user)
+// Package sharkredis 创建并管理集群或单机 Redis 客户端。
+// Config 支持连接池、超时、重试及可选地址替换；创建客户端时会执行 Ping 健康检查。
+// Helper 还封装了常用对象存取、批量扫描和删除操作。
 package sharkredis
 
 import (

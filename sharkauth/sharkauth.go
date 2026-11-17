@@ -1,65 +1,8 @@
 // Package sharkauth 提供基于树形结构的权限管理模型。
 //
-// 核心概念：
-//
-//	权限体系采用多叉树结构建模，每个节点代表一个功能模块或 API 资源。
-//	通过 Name 标识节点名称，通过 Children 构成父子层级关系，通过 Urls 关联 API 路径，
-//	通过 Auth（三位状态码：0=未设置, 1=有权限, 2=无权限）标记权限状态。
-//
-// 核心功能：
-//  1. AuthNode 结构体：权限树节点定义（支持 JSON 序列化）
-//  2. NormalizeAuthTree：深拷贝并统一设置权限状态（初始化权限模板）
-//  3. PruneAuth：递归裁剪无意义的中间节点（精简权限树）
-//  4. PruneUnauthorizedAuthTree：父子权限继承裁剪（父角色回收后子角色自动缩小）
-//  5. SyncAuthTree：对比父/子权限树生成带状态标记的编辑树（前端权限界面渲染）
-//  6. Permissions：将树形权限转换为 URL→权限路径 的 O(1) 查表结构（API 鉴权中间件）
-//  7. Flatten：将权限树扁平化为路径→1 的 map（Redis 缓存/前端判断）
-//
-// 使用场景：
-//   - RBAC 角色权限管理
-//   - 父子角色权限继承
-//   - 前端菜单树渲染（含选中/禁用状态）
-//   - API 鉴权中间件
-//
-// 树形结构示例：
-//
-//	系统管理                        ← 根节点
-//	├── 用户管理                    ← 中间节点（折叠层）
-//	│   ├── 用户列表  Urls: ["/api/user/list"]    Auth: 1（有权限）
-//	│   └── 用户详情  Urls: ["/api/user/detail"]  Auth: 2（无权限但可见）
-//	└── 角色管理
-//	    └── 角色列表  Urls: ["/api/role/list"]     Auth: 1
-//
-// 使用示例：
-//
-//	// 构建完整功能树（定义系统所有功能）
-//	fullTree := []*sharkauth.AuthNode{
-//	    {
-//	        Name: "系统管理",
-//	        Children: []*sharkauth.AuthNode{
-//	            {
-//	                Name: "用户管理",
-//	                Children: []*sharkauth.AuthNode{
-//	                    {Name: "用户列表", Urls: []string{"/api/user/list"}},
-//	                    {Name: "用户详情", Urls: []string{"/api/user/detail"}},
-//	                },
-//	            },
-//	        },
-//	    },
-//	}
-//
-//	// 初始化子角色权限模板（所有功能默认 Auth=2 无权限）
-//	childTree := sharkauth.NormalizeAuthTree(fullTree, 2)
-//
-//	// 设置子角色部分权限
-//	childTree[0].Children[0].Children[0].Auth = 1 // 用户列表 → 有权限
-//
-//	// 裁剪无意义节点
-//	pruned := sharkauth.PruneAuth(childTree)
-//
-//	// 转换为 URL→权限映射（用于鉴权中间件）
-//	urlPermMap := sharkauth.Permissions(fullTree)
-//	// urlPermMap["/api/user/list"] → ["系统管理.用户管理.用户列表"]
+// 每个节点代表一个功能或 API，可通过 Children 构成层级、Urls 关联路径。
+// Auth 状态为 0（未设置）、1（有权限）或 2（无权限）。
+// 本包提供权限树的归一化、裁剪、同步，以及路径映射和扁平化操作。
 package sharkauth
 
 import (

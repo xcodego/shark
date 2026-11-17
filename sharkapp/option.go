@@ -67,6 +67,7 @@ type Options struct {
 	etcd          *sharketcd.Config       // etcd 配置
 	http          int                     // HTTP 端口
 	rsaPrivateKey *rsa.PrivateKey         // RSA 私钥，用于解密配置中的密码
+	antpool       int                     // ants 池大小，默认 100
 }
 
 // -- WithXxx 链式配置方法 --
@@ -231,7 +232,7 @@ func (o *Options) WithEnv(env string) *Options {
 	return o
 }
 
-// WithID 设置实例编号。
+// WithId 设置实例编号。
 func (o *Options) WithId(id string) *Options {
 	if id == "" {
 		return o
@@ -301,6 +302,7 @@ func readSlices(v *viper.Viper, key string) []string {
 	return result
 }
 
+// NewOption 从默认配置加载应用选项，不使用 RSA 私钥解密配置。
 func NewOption(project string, name string) (*Options, error) {
 	return NewOptionWithRsa(project, name, "")
 }

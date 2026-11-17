@@ -20,6 +20,7 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+// SharkElastic 封装 Elasticsearch 客户端及索引、查询辅助方法。
 type SharkElastic struct {
 	Client *elasticsearch.Client
 }
@@ -992,127 +993,9 @@ func (s *SharkElastic) ExportCsvBySql(ctx context.Context, sql string, name stri
 	return fileName, nil
 }
 
-// SqlRaw 执行 SQL 风格查询并返回原始 ES 响应 JSON 字节。
-//
-// 设计目的
-//
-// SqlRaw 面向需要直接处理 ES 原始响应的场景（如手动解析 hits 元数据、调试 SQL 翻译结果等）。
-// 它返回 ES Search API 的完整 JSON 响应，调用方可自行提取 hits.hits、hits.total 等字段。
-//
-// 与 Find 的边界
-//
-//   - SqlRaw → 返回原始 ES JSON 字节，灵活但需手动解析。适合需要 total、_score 等元信息、
-//     或自定义反序列化逻辑的场景。
-//   - Find   → 自动提取 _source 并反序列化到切片。仅需文档列表时更便捷（类似 GORM Find）。
-//
-// SQL 完整格式：
-//
-//	[select field,...] from indexname where conditions [order by field [asc|desc], ...] [limit N] [offset N]
-//
-// 各子句映射：
-//
-//	select name,age   → ES _source 字段过滤（仅返回指定字段）
-//	from indexname    → 目标索引（必填，无默认值）
-//	where conditions  → 过滤条件，仅支持以下运算符和逻辑组合
-//	order by field... → ES sort
-//	limit N           → ES size，返回文档数上限
-//	offset N          → ES from，分页偏移量（必须在 limit 之后）
-//
-// where 条件支持的运算符：
-//
-//	=      → term         精确匹配
-//	!=     → bool.must_not
-//	>      → range gt      大于
-//	>=     → range gte     大于等于
-//	<      → range lt      小于
-//	<=     → range lte     小于等于
-//	in     → terms         多值匹配
-//	like   → match         全文搜索（⚠️ 非 SQL LIKE 通配符，是 ES match 查询）
-//	and    → bool.must     逻辑与（AND 优先级高于 OR）
-//	or     → bool.should   逻辑或
-//	()     → 分组，改变优先级
-//
-// order by 排序：
-//
-//	order by field1 [asc|desc], field2 [asc|desc], ...
-//	默认排序方向为 asc，多字段用逗号分隔
-//	位于 limit/offset 之前：where ... order by age desc limit 10
-//
-// 不支持的功能及其原因：
-//
-//   - 聚合（aggregations）、分组（group by）
-//     → 聚合返回聚合桶而非文档列表，与当前文档查询模型完全不同
-//   - select 别名（如 select name as n）
-//     → ES _source 不支持字段重命名，需 script_fields 替代，但返回结构从 _source 变为 fields，
-//     且 Find() 的"反序列化到结构体"流程会完全失效
-//   - select DISTINCT
-//     → ES 无原生 distinct 查询，需 collapse（折叠）或 terms aggregation，
-//     本质是聚合去重，不再是文档查询语义
-//   - select 表达式（如 select age+1, price*0.9）
-//     → ES 需 script_fields + Painless 脚本，返回 fields 数组而非 _source，
-//     且引入脚本注入风险和性能开销
-//   - SQL 通配符 LIKE（%）、BETWEEN、IS NULL
-//     → 当前 like 映射为 ES match（全文搜索），非通配符匹配
-//   - 算术表达式、函数调用、子查询、JOIN
-//     → ES 不支持 SQL 级别的关系运算和嵌套查询
-//
-// 注意：
-//   - 字符串值需用引号包裹：name = '张三' 或 name = "张三"
-//   - IN 值列表用括号：status in (1, 2, 3)
-//   - like 映射为 ES Match Query（全文搜索语义），不是 SQL 的通配符匹配
-//
-// 使用示例：
-//
-//	// 简单条件查询
-//	resp, err := es.SqlRaw(ctx, "from users where status = 1")
-//
-//	// 多条件 + 范围 + 分页
-//	resp, err := es.SqlRaw(ctx, "from users where status = 1 and age >= 18 limit 10")
-//
-//	// 字段过滤 + OR 分组
-//	resp, err := es.SqlRaw(ctx, "select name,age from users where (city = '北京' or city = '上海') and status = 1")
-//
-//	// 排序 + 分页
-//	resp, err := es.SqlRaw(ctx, "from users where status = 1 order by age desc limit 10 offset 5")
-//
-// 参数：
-//   - ctx: 上下文
-//   - sql: SQL 风格查询字符串，必须包含 from 子句
-//
-// 返回：
-//   - []byte: ES 搜索原始响应 JSON
-//   - error:  解析失败、缺少 from 子句或 ES 请求失败时返回错误
-//
-// Summary 执行聚合查询，自动提取聚合值并反序列化到 value。
-//
-// SQL 必须是聚合语句（含 sum/avg/count/min/max 或聚合表达式），
-// 方法自动解析 ES 聚合响应，将每个聚合的 .value 提取为 key-value 映射，
-// 序列化为 JSON 后再反序列化到 value 指针指向的结构体中。
-//
-// 聚合表达式（如 sum(a)-sum(b) as x）由 bucket_script 实现，
-// Summary 自动检测 filters 包裹层，无论有无 pipeline 均返回统一结果。
-//
-// value 必须是结构体指针，字段名（json tag）需与 select 别名一致。
-//
-// 使用示例：
-//
-//	type AggResult struct {
-//	    Count  int     `json:"count"`
-//	    Amount float64 `json:"amount"`
-//	    X      float64 `json:"x"`
-//	}
-//
-//	var result AggResult
-//	err := es.Summary(ctx,
-//	    "select count(*) as count, sum(amount) as amount, (sum(amount)-sum(winlost_amount)) as x from orders",
-//	    &result,
-//	)
-//	// result.Count = 3, result.Amount = 600.0, result.X = 540.0
-//
-// 参数：
-//   - ctx:   上下文
-//   - sql:   聚合 SQL 语句，必须包含 from 子句
-//   - value: 聚合结果结构体指针
+// Summary 执行聚合 SQL 查询，并将聚合值解码到 value。
+// value 必须是结构体指针，字段的 json 标签需与 SQL 中的聚合别名一致。
+// 聚合算术表达式由 Elasticsearch bucket_script 处理。
 func (s *SharkElastic) Summary(ctx context.Context, sql string, value any) error {
 	if strings.TrimSpace(sql) == "" {
 		return fmt.Errorf("SQL 不能为空")
@@ -1168,6 +1051,7 @@ func (s *SharkElastic) Summary(ctx context.Context, sql string, value any) error
 	return nil
 }
 
+// SqlRaw 解析 SQL 风格查询并返回 Elasticsearch 原始响应。
 func (s *SharkElastic) SqlRaw(ctx context.Context, sql string) ([]byte, error) {
 	if strings.TrimSpace(sql) == "" {
 		return nil, fmt.Errorf("SQL 不能为空")
@@ -1290,6 +1174,7 @@ func (s *SharkElastic) Find(ctx context.Context, sql string, result any) error {
 	return nil
 }
 
+// Page 执行分页 SQL 风格查询，将结果解码到 result 并返回总数。
 func (s *SharkElastic) Page(ctx context.Context, sql string, page int, pageSize int, result any) (int64, error) {
 	if strings.TrimSpace(sql) == "" {
 		return 0, fmt.Errorf("SQL 不能为空")

@@ -771,6 +771,7 @@ func (h *Helper) mutexKey(value ...any) string {
 	return fmt.Sprintf("%v:mutex:%v:%v", h.project, h.name, s)
 }
 
+// NewMutex 创建基于 Redis 的互斥锁，键由 value 生成。
 func (h *Helper) NewMutex(value ...any) *SharkMutex {
 	key := h.mutexKey(value...)
 	return &SharkMutex{
