@@ -117,7 +117,7 @@ func (s *Snowflake) Generate() int64 {
 			break
 		}
 	}
-	// ID 组装：高 41 位 = (当前时间 - 纪元)，低 19 位 = 序列号
+	// Id 组装：高 41 位 = (当前时间 - 纪元)，低 19 位 = 序列号
 	id := (s.timeStamp-epoch)<<19 | s.sequenceId
 	return id
 }
