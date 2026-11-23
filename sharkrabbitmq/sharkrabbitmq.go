@@ -449,11 +449,7 @@ func (c *Client) BatchConsume(exchange string, queue string, key string, cfg *Ba
 			}
 			for {
 				// 批量收集消息
-				messages, err := sharkutils.DrainChannelN(ctx, drainChannel, batchSize, *cfg.Timeout)
-				if err != nil {
-					cancel()
-					break
-				}
+				messages := sharkutils.DrainChannelN(ctx, drainChannel, batchSize, *cfg.Timeout)
 				result := safeHandler(messages)
 				if !result {
 					cancel()

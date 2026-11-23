@@ -3,6 +3,7 @@ package sharkapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/pprof"
@@ -411,41 +412,114 @@ func (a *App) Hunt(components ...AppComponent) {
 	a.sharklog.Close()
 }
 
-// SafeGo 在后台执行 fn，并恢复 panic、记录错误。
-// args 会原样传递给 fn；启动的 goroutine 不会登记到 Wg。
-func (a *App) SafeGo(fn func(args ...any), args ...any) {
+func (a *App) RunInPool(fn func(args ...any), args ...any) {
 	if fn == nil {
+		a.Logger.Warn("RunInPool nil function provided")
 		return
 	}
+	if a.AntPool == nil {
+		a.Logger.Error("RunInPool AntPool is nil")
+		return
+	}
+	a.Wg.Add(1)
 	go func() {
+		defer a.Wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
 				if a.Logger != nil {
-					a.Logger.Error("panic in go routine", zap.Any("panic", r), zap.String("stack", string(debug.Stack())))
+					a.Logger.Error("RunInPool panic in go routine", zap.Any("panic", r), zap.String("stack", string(debug.Stack())))
 				} else {
-					fmt.Printf("panic in go routine: %v\n%s", r, string(debug.Stack()))
+					fmt.Printf("RunInPool panic in go routine: %v\n%s", r, string(debug.Stack()))
 				}
 			}
 		}()
-		fn(args...)
+		a.AntPool.Submit(func() {
+			fn(args...)
+		})
 	}()
 }
 
-// SafeFunction 返回一个会恢复 panic 并记录错误的 fn 包装函数。
-func (a *App) SafeFunction(fn func()) func() {
-	if fn == nil {
-		return nil
+// WithTimeout 在指定时间内执行 fn；超时或 parent 被取消时返回 ErrTimeout。
+func (a *App) WithTimeout(ctx context.Context, timeout time.Duration, fn func(context.Context) error) error {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return func() {
+	if a.AntPool == nil {
+		return errors.New("WithTimeout AntPool is nil")
+	}
+	ctxinner, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ch := make(chan error, 1)
+
+	err := a.AntPool.Submit(func() {
+		var err error
 		defer func() {
 			if r := recover(); r != nil {
-				if a.Logger != nil {
-					a.Logger.Error("panic in function", zap.Any("panic", r), zap.String("stack", string(debug.Stack())))
-				} else {
-					fmt.Printf("panic in function: %v\n%s", r, string(debug.Stack()))
+				select {
+				case ch <- fmt.Errorf("panic: %v\n%s", r, debug.Stack()):
+				default:
 				}
+				return
+			}
+			select {
+			case ch <- err:
+			default:
 			}
 		}()
-		fn()
+		err = fn(ctxinner)
+	})
+	if err != nil {
+		return err
 	}
+	select {
+	case err := <-ch:
+		return err
+	case <-ctxinner.Done():
+		select {
+		case err := <-ch:
+			return err
+		default:
+			if errors.Is(ctxinner.Err(), context.DeadlineExceeded) {
+				return errors.New("timeout")
+			}
+			return ctxinner.Err()
+		}
+	}
+}
+
+// ParallelCall 并行执行函数，等待全部完成并合并返回的错误和 panic。
+func (a *App) ParallelCall(funcs ...func() error) error {
+	if a.AntPool == nil {
+		return errors.New("AntPool is nil")
+	}
+	var wg sync.WaitGroup
+	ch := make(chan error, len(funcs))
+
+	for _, fn := range funcs {
+		if fn == nil {
+			continue
+		}
+		f := fn
+		wg.Add(1)
+		a.AntPool.Submit(func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					ch <- fmt.Errorf("panic: %v\n%s", r, debug.Stack())
+				}
+			}()
+			err := f()
+			if err != nil {
+				ch <- err
+			}
+		})
+	}
+	wg.Wait()
+	close(ch)
+	errs := make([]error, 0, len(funcs))
+	for err := range ch {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }

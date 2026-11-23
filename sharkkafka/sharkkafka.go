@@ -405,11 +405,7 @@ func (s *SharkKafka) BatchConsumer(topic string, group string, cfg *BatchConfig,
 	go func() {
 		for {
 			// 批量排空 channel，最多取 batchSize 条
-			messages, err := sharkutils.DrainChannelN(running, channel, batchSize, *cfg.Timeout)
-			if err != nil {
-				// channel 为空且上下文已取消 → 正常退出
-				return
-			}
+			messages := sharkutils.DrainChannelN(running, channel, batchSize, *cfg.Timeout)
 			// 调用 handler 处理消息
 			result := safeHandler(messages)
 			if !result {
@@ -421,9 +417,7 @@ func (s *SharkKafka) BatchConsumer(topic string, group string, cfg *BatchConfig,
 			// 提交 offset 一直重试,直到成功
 			var commitError error
 			for i := 0; i < 50000000; i++ {
-				commitError = sharkutils.WithTimeout(s.antpool, running, time.Second, func(ctx context.Context) error {
-					return reader.CommitMessages(ctx, messages...)
-				})
+				commitError = reader.CommitMessages(running, messages...)
 				if commitError == nil {
 					break // 提交成功
 				}

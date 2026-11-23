@@ -8,21 +8,15 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	crand "math/rand/v2"
 	"net"
 	"net/http"
 	"reflect"
-	"runtime"
-	"runtime/debug"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/panjf2000/ants/v2"
-	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -73,101 +67,21 @@ func BcryptCheck(hashedPassword string, password string) bool {
 	return err == nil
 }
 
-// ErrTimeout 表示 WithTimeout 超时或 context 被取消。
-var ErrTimeout = errors.New("sharkutils: timeout")
-
-// WithTimeout 在指定时间内执行 fn；超时或 parent 被取消时返回 ErrTimeout。
-func WithTimeout(pool *ants.Pool, parent context.Context, timeout time.Duration, fn func(context.Context) error) error {
-	ctx, cancel := context.WithTimeout(parent, timeout)
-	defer cancel()
-
-	ch := make(chan error, 1)
-
-	err := pool.Submit(func() {
-		var err error
-		defer func() {
-			if r := recover(); r != nil {
-				select {
-				case ch <- fmt.Errorf("panic: %v\n%s", r, debug.Stack()):
-				default:
-				}
-				return
-			}
-			select {
-			case ch <- err:
-			default:
-			}
-		}()
-		err = fn(ctx)
-	})
-	if err != nil {
-		return err
-	}
-	select {
-	case err := <-ch:
-		return err
-	case <-ctx.Done():
-		select {
-		case err := <-ch:
-			return err
-		default:
-			return ErrTimeout
-		}
-	}
-}
-
-// ParallelCall 并行执行函数，等待全部完成并合并返回的错误和 panic。
-func ParallelCall(pool *ants.Pool, funcs ...func() error) error {
-	if pool == nil {
-		return errors.New("pool is nil")
-	}
-	var wg sync.WaitGroup
-	ch := make(chan error, len(funcs))
-
-	for _, fn := range funcs {
-		if fn == nil {
-			continue
-		}
-		wg.Add(1)
-		f := fn
-		pool.Submit(func() {
-			defer wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					ch <- fmt.Errorf("panic: %v\n%s", r, debug.Stack())
-				}
-			}()
-			err := f()
-			if err != nil {
-				ch <- err
-			}
-		})
-	}
-	wg.Wait()
-	close(ch)
-	errs := make([]error, 0, len(funcs))
-	for err := range ch {
-		errs = append(errs, err)
-	}
-	return errors.Join(errs...)
-}
-
 // DrainChannelN 最多读取 size 条数据，并支持 context 取消和超时等待。
-func DrainChannelN[T any](ctx context.Context, ch <-chan T, size int, timeout time.Duration) ([]T, error) {
-	if size <= 0 {
-		return nil, nil
+func DrainChannelN[T any](ctx context.Context, ch <-chan T, size int, timeout time.Duration) []T {
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	var result []T = make([]T, 0, size)
-
 	if ch == nil || size <= 0 {
-		return result, nil
+		return result
 	}
 	select {
 	case <-ctx.Done():
-		return result, ctx.Err()
+		return result
 	case v, ok := <-ch:
 		if !ok {
-			return result, errors.New("channel closed")
+			return result
 		}
 		result = append(result, v)
 	}
@@ -175,37 +89,26 @@ func DrainChannelN[T any](ctx context.Context, ch <-chan T, size int, timeout ti
 	for len(result) < size {
 		select {
 		case <-ctx.Done():
-			return result, ctx.Err()
+			return result
 		case v, ok := <-ch:
 			if !ok {
-				return result, errors.New("channel closed")
+				return result
 			}
 			result = append(result, v)
 		default:
-			if timeout > 0 && time.Since(start) <= timeout {
+			since := time.Since(start)
+			if timeout > 0 && since <= timeout {
 				sleepTime := time.Second
-				if timeout-time.Since(start) < sleepTime {
-					sleepTime = timeout - time.Since(start)
+				if timeout-since < sleepTime {
+					sleepTime = timeout - since
 				}
 				time.Sleep(sleepTime)
 				continue
 			}
-			return result, nil
+			return result
 		}
 	}
-	return result, nil
-}
-
-// Recover 捕获当前 goroutine 的 panic，并通过 logger 记录调用栈。
-func Recover(logger *zap.Logger, name string) {
-	if r := recover(); r != nil {
-		if logger == nil {
-			return
-		}
-		buf := make([]byte, 10240)
-		n := runtime.Stack(buf, false)
-		logger.Error(fmt.Sprintf("panic: %s %v\n%s", name, r, string(buf[:n])))
-	}
+	return result
 }
 
 // Pointer 返回 v 的指针。
