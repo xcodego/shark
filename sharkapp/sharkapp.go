@@ -546,15 +546,22 @@ func (a *App) banner() {
 //
 // 使用示例:
 //
-//	app.Go(func(ctx context.Context) {
+//	app.SafeGo(func(ctx context.Context) {
 //	    // 后台任务，panic 不会导致程序崩溃
 //	})
-func (a *App) Go(fn func(ctx context.Context)) {
+func (a *App) SafeGo(fn func(ctx context.Context)) {
+	if fn == nil {
+		return
+	}
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				// 记录 panic 信息和完整调用栈
-				a.Logger.Error("panic in go routine", zap.Any("panic", r), zap.String("stack", string(debug.Stack())))
+				if a.Logger != nil {
+					a.Logger.Error("panic in go routine", zap.Any("panic", r), zap.String("stack", string(debug.Stack())))
+				} else {
+					fmt.Printf("panic in go routine: %v\n%s", r, string(debug.Stack()))
+				}
 			}
 		}()
 		fn(a.Context)
