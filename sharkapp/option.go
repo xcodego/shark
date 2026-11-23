@@ -20,31 +20,7 @@ import (
 	"github.com/xcodego/shark/sharkrisingwave"
 )
 
-// Options 是应用的配置集合，包含了所有中间件的连接配置。
-//
-// 所有字段均为小写（私有），外部只能通过 NewOption() 加载，
-// 或通过 WithXxx 方法链式覆盖单个配置项。
-// 这种设计保证了配置来源的统一性和可控性。
-//
-// 配置加载优先级（由高到低）：
-//  1. 环境变量（如 REDIS_HOST 覆盖 redis.host）
-//  2. config.yaml 配置文件
-//  3. 代码默认值
-//
-// 使用示例：
-//
-//	// 从本地配置文件加载
-//	opts, err := sharkapp.NewOption("myproject", "game-server")
-//	if err != nil {
-//	    panic(err)
-//	}
-//
-//	// 链式覆盖部分配置
-//	opts.WithDB(&sharkdb.Config{Host: "custom-db:3306", User: "root", Password: "", Database: "mydb"}).
-//	    WithRedis(&sharkredis.Config{Host: []string{"cache:6379"}, Password: ""})
-//
-//	// 传递给应用启动
-//	app, err := sharkapp.New(opts)
+// Options 保存应用及其中间件配置，可通过 NewOption 加载并用 WithXxx 方法覆盖。
 type Options struct {
 	id            string                  // 实例编号，默认 "1"
 	db            *sharkdb.Config         // MySQL/GORM 数据库配置
@@ -68,12 +44,10 @@ type Options struct {
 	http          int                     // HTTP 端口
 	rsaPrivateKey *rsa.PrivateKey         // RSA 私钥，用于解密配置中的密码
 	antpool       int                     // ants 池大小，默认 100
+	kafkalog      bool                    // 是否启用 Kafka 日志
 }
 
-// -- WithXxx 链式配置方法 --
-
-// WithDB 设置 MySQL 数据库配置。
-// config 为 nil 时不做任何修改（保留现有配置）。
+// WithDB 设置 MySQL 数据库配置；配置为空时不修改现有值。
 func (o *Options) WithDB(config *sharkdb.Config) *Options {
 	if config == nil {
 		return o
@@ -85,8 +59,7 @@ func (o *Options) WithDB(config *sharkdb.Config) *Options {
 	return o
 }
 
-// WithRedis 设置 Redis 兼容模式配置（自动探测集群/单机）。
-// config 为 nil 时不做任何修改。
+// WithRedis 设置自动识别模式的 Redis 配置。
 func (o *Options) WithRedis(config *sharkredis.Config) *Options {
 	if config == nil || len(config.Host) == 0 {
 		return o
@@ -95,7 +68,13 @@ func (o *Options) WithRedis(config *sharkredis.Config) *Options {
 	return o
 }
 
-// WithRedisCluster 设置 Redis 集群模式配置。
+// WithKafkaLog 设置是否启用 Kafka 日志。
+func (o *Options) WithKafkaLog(config bool) *Options {
+	o.kafkalog = config
+	return o
+}
+
+// WithRedisCluster 设置 Redis 集群配置。
 func (o *Options) WithRedisCluster(config *sharkredis.Config) *Options {
 	if config == nil || len(config.Host) == 0 {
 		return o
@@ -104,7 +83,7 @@ func (o *Options) WithRedisCluster(config *sharkredis.Config) *Options {
 	return o
 }
 
-// WithRedisClient 设置 Redis 单机/主从模式配置。
+// WithRedisClient 设置 Redis 单机或主从配置。
 func (o *Options) WithRedisClient(config *sharkredis.Config) *Options {
 	if config == nil || len(config.Host) == 0 {
 		return o
@@ -113,7 +92,7 @@ func (o *Options) WithRedisClient(config *sharkredis.Config) *Options {
 	return o
 }
 
-// WithKafka 设置 Kafka 消息队列配置。
+// WithKafka 设置 Kafka 配置。
 func (o *Options) WithKafka(config *sharkkafka.Config) *Options {
 	if config == nil || len(config.Host) == 0 {
 		return o
@@ -176,8 +155,7 @@ func (o *Options) WithEtcd(config *sharketcd.Config) *Options {
 	return o
 }
 
-// WithHTTP 设置 HTTP 服务端口。
-// port 必须在 1~65535 之间，否则设置无效。
+// WithHTTP 设置 HTTP 端口；无效端口会被忽略。
 func (o *Options) WithHTTP(port int) *Options {
 	if port < 1 || port > 65535 {
 		return o
@@ -186,8 +164,7 @@ func (o *Options) WithHTTP(port int) *Options {
 	return o
 }
 
-// WithGrpc 设置 gRPC 服务端口。
-// port 必须在 1~65535 之间，否则设置无效。
+// WithGrpc 设置 gRPC 端口；无效端口会被忽略。
 func (o *Options) WithGrpc(port int) *Options {
 	if port < 1 || port > 65535 {
 		return o
@@ -196,8 +173,7 @@ func (o *Options) WithGrpc(port int) *Options {
 	return o
 }
 
-// WithHealth 设置健康检查服务端口。
-// port 必须在 1~65535 之间，否则设置无效。
+// WithHealth 设置健康检查端口；无效端口会被忽略。
 func (o *Options) WithHealth(port int) *Options {
 	if port < 1 || port > 65535 {
 		return o
@@ -206,8 +182,7 @@ func (o *Options) WithHealth(port int) *Options {
 	return o
 }
 
-// WithPprof 设置 pprof 性能分析端口。
-// port 必须在 1~65535 之间，否则设置无效。
+// WithPprof 设置 pprof 端口；无效端口会被忽略。
 func (o *Options) WithPprof(port int) *Options {
 	if port < 1 || port > 65535 {
 		return o
@@ -222,8 +197,7 @@ func (o *Options) WithTimer(enable bool) *Options {
 	return o
 }
 
-// WithEnv 设置运行环境。
-// 允许的值为 "dev"、"test"、"prod"。
+// WithEnv 设置运行环境，仅接受 dev、test 或 prod。
 func (o *Options) WithEnv(env string) *Options {
 	switch env {
 	case "dev", "test", "prod":
@@ -232,7 +206,7 @@ func (o *Options) WithEnv(env string) *Options {
 	return o
 }
 
-// WithId 设置实例编号。
+// WithId 设置实例编号；空值会被忽略。
 func (o *Options) WithId(id string) *Options {
 	if id == "" {
 		return o
@@ -241,13 +215,13 @@ func (o *Options) WithId(id string) *Options {
 	return o
 }
 
-// parseRSAPrivateKey 解析 PEM 格式的 RSA 私钥（支持 PKCS1 和 PKCS8）。
+// parseRSAPrivateKey 解析 PKCS#1 或 PKCS#8 PEM 格式的 RSA 私钥。
 func parseRSAPrivateKey(pemStr string) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode([]byte(pemStr))
 	if block == nil {
 		return nil, fmt.Errorf("failed to parse PEM block")
 	}
-	// 先尝试 PKCS8
+	// 优先尝试 PKCS#8。
 	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err == nil {
 		if rsaKey, ok := key.(*rsa.PrivateKey); ok {
@@ -255,13 +229,11 @@ func parseRSAPrivateKey(pemStr string) (*rsa.PrivateKey, error) {
 		}
 		return nil, fmt.Errorf("not an RSA private key (PKCS8)")
 	}
-	// 回退 PKCS1
+	// 回退到 PKCS#1。
 	return x509.ParsePKCS1PrivateKey(block.Bytes)
 }
 
-// decryptPassword 使用 RSA 私钥解密密码。
-// 对密码进行标准 PKCS#1 v1.5 解密：
-// 密码是 Base64 编码的密文 → 解码 → RSA 解密，成功返回明文，失败返回原值。
+// decryptPassword 解密 Base64 编码的 PKCS#1 v1.5 密文；失败时返回原值。
 func (o *Options) decryptPassword(password string) string {
 	if o.rsaPrivateKey == nil || password == "" {
 		return password
@@ -277,9 +249,7 @@ func (o *Options) decryptPassword(password string) string {
 	return string(plain)
 }
 
-// ========== 配置加载 ==========
-
-// readSlices 从 viper 中读取字符串切片配置。
+// readSlices 从 Viper 中读取并拆分字符串切片或逗号分隔值。
 func readSlices(v *viper.Viper, key string) []string {
 	ss := v.GetStringSlice(key)
 	var result []string
@@ -302,35 +272,32 @@ func readSlices(v *viper.Viper, key string) []string {
 	return result
 }
 
-// NewOption 从默认配置加载应用选项，不使用 RSA 私钥解密配置。
+// NewOption 从默认配置文件加载选项，不解密密码。
 func NewOption(project string, name string) (*Options, error) {
-	return NewOptionWithRsa(project, name, "")
+	return NewOptionWithRsaAndConfigFile(project, name, "", "")
 }
 
-// NewOptionWithRsa 从本地 YAML 配置文件（config.yaml）中加载应用配置。
-//
-// 配置加载流程:
-//  1. 创建 viper 实例，读取当前目录或 ./config 目录下的 config.yaml
-//  2. 同时支持环境变量覆盖（环境变量中 . 替换为 _，如 redis.host → REDIS_HOST）
-//  3. rsa 非空时解析 PEM 私钥，用于解密配置中的密码字段；为空则密码按明文使用。
-//     私钥只来自本函数参数，不读取 SHARK_PRIVATE_KEY 或其它环境变量。
-//     解析失败在启动阶段直接 panic（返回 error 容易被忽略，必须立刻引起重视）。
-//  4. 按照统一的 key 格式解析各中间件的连接信息
-//  5. 仅当 host 列表非空时才创建对应的 Config 实例
-//
-// 参数:
-//   - project: 项目名称
-//   - name:    服务名称
-//   - rsa:     PEM 格式 RSA 私钥（PKCS1/PKCS8），空字符串表示不解密密码
-//
-// 返回值:
-//   - *Options: 配置对象
-//   - error:    配置文件格式错误时返回
-//
-// 注意:
-//   - 如果 config.yaml 文件不存在，不会报错，所有中间件配置为空
-//   - 环境变量优先级高于配置文件
-func NewOptionWithRsa(project string, name string, rsa string) (*Options, error) {
+// NewOptionWithConfigFile 从指定 YAML 文件加载选项，不解密密码。
+func NewOptionWithConfigFile(project string, name string, configFile string) (*Options, error) {
+	v := viper.New()
+	v.SetConfigFile(configFile)
+	v.SetConfigType("yaml")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
+
+	if err := v.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			return nil, fmt.Errorf("read config file failed: %w", err)
+		}
+	}
+
+	return NewOptionWithRsaAndConfigFile(project, name, "", configFile)
+}
+
+// NewOptionWithRsaAndConfigFile 从 YAML 文件加载选项，并可用 RSA 私钥解密密码。
+// configFile 为空时使用 ./config/config.yaml；文件不存在时使用默认值和环境变量。
+// rsa 必须是 PKCS#1 或 PKCS#8 PEM 格式；解析失败会 panic。
+func NewOptionWithRsaAndConfigFile(project string, name string, rsa string, configFile string) (*Options, error) {
 	if project == "" {
 		return nil, fmt.Errorf("project required")
 	}
@@ -338,11 +305,12 @@ func NewOptionWithRsa(project string, name string, rsa string) (*Options, error)
 		return nil, fmt.Errorf("name required")
 	}
 
+	if configFile == "" {
+		configFile = "./config/config.yaml"
+	}
+
 	v := viper.New()
-	v.SetConfigName("config")
-	v.SetConfigType("yaml")
-	v.AddConfigPath(".")
-	v.AddConfigPath("./config")
+	v.SetConfigFile(configFile)
 	v.SetDefault("env", "dev")
 	v.SetDefault("id", "1")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
@@ -355,15 +323,16 @@ func NewOptionWithRsa(project string, name string, rsa string) (*Options, error)
 	}
 
 	opts := &Options{
-		project: project,
-		name:    name,
-		env:     strings.TrimSpace(v.GetString("env")),
-		id:      strings.TrimSpace(v.GetString("id")),
-		timer:   v.GetBool("timer"),
-		pprof:   v.GetInt("pprof"),
-		grpc:    v.GetInt("grpc"),
-		health:  v.GetInt("health"),
-		http:    v.GetInt("http"),
+		project:  project,
+		name:     name,
+		env:      strings.TrimSpace(v.GetString("env")),
+		id:       strings.TrimSpace(v.GetString("id")),
+		kafkalog: v.GetBool("kafkalog"),
+		timer:    v.GetBool("timer"),
+		pprof:    v.GetInt("pprof"),
+		grpc:     v.GetInt("grpc"),
+		health:   v.GetInt("health"),
+		http:     v.GetInt("http"),
 	}
 
 	if rsa != "" {
@@ -376,12 +345,12 @@ func NewOptionWithRsa(project string, name string, rsa string) (*Options, error)
 		opts.rsaPrivateKey = k
 	}
 
-	// 校验端口范围
+	// 校验端口范围。
 	if err := opts.validatePorts(); err != nil {
 		return nil, err
 	}
 
-	// 解析各中间件配置（密码字段在读取时自动解密）
+	// 解析中间件配置并解密密码。
 	opts.parseRedisCluster(v)
 	opts.parseRedisClient(v)
 	opts.parseRedis(v)

@@ -210,9 +210,8 @@ func New(options *Options) (*App, error) {
 		app.Kafka = kafka
 		app.Logger.Info("连接kafka成功", zap.Strings("host", options.kafka.Host), zap.String("user", options.kafka.User))
 
-		// dev/test 环境自动将日志写入 Kafka，方便开发调试
-		// 生产环境由运维统一收集日志，不需要应用层自行写入
-		if app.Env == "dev" || app.Env == "test" {
+		// 如果启用了 Kafka 日志，则创建对应的 Writer
+		if options.kafkalog {
 			topic := fmt.Sprintf("%v_game_log_%v", app.Project, app.Env)
 			kafkaLogWriter, err := app.Kafka.Writer(topic, &sharkkafka.WriterConfig{
 				Async: sharkutils.Pointer(true), // 异步写入 Kafka，避免阻塞业务日志
