@@ -1,22 +1,4 @@
-// Package sharkapp 是 Shark 框架的核心应用层，提供应用生命周期管理、
-// 中间件初始化和服务启动。App 按常驻进程设计，不以完整关闭中间件连接为目标。
-//
-// Shark 是一个一站式后端微服务框架，统一封装了 MySQL、Redis、Kafka、
-// Elasticsearch、MongoDB、RabbitMQ、MinIO、etcd、RisingWave 等常用中间件的
-// 连接管理和配置加载，让开发者可以专注于业务逻辑。
-//
-// 典型用法:
-//
-//	// 方式一：从 YAML 配置文件加载
-//	options, _ := sharkapp.NewOption("myproject", "myapp")
-//	app, _ := sharkapp.New(options)
-//	app.Hunt()
-//
-//	// 方式二：在代码中指定配置
-//	options, _ := sharkapp.NewOption("myproject", "myapp")
-//	options.WithDB(&sharkdb.Config{...}).WithRedis(&sharkredis.Config{...})
-//	app, _ := sharkapp.New(options)
-//	app.Hunt()
+// Package sharkapp 初始化应用及其中间件，并管理服务生命周期。
 package sharkapp
 
 import (
@@ -61,118 +43,73 @@ import (
 	"gorm.io/gorm"
 )
 
-// App 是 Shark 框架的核心结构体，聚合了所有中间件客户端和服务组件。
-//
-// App 按常驻进程设计：进程生命周期与服务一致，不以「可完整关闭再退出」为目标。
-// Hunt 收到信号后只 cancel context、短暂等待、关闭日志 Writer；
-// 不关闭 HTTP/gRPC 监听，也不逐个 Close DB/Redis/Kafka 等连接。
-//
-// App 负责：
-//   - 管理应用的生命周期（context、WaitGroup、取消信号）
-//   - 统一初始化所有中间件连接（数据库、缓存、消息队列等）
-//   - 提供 HTTP/gRPC 服务的启动
-//   - 内建 pprof 与进程存活探测（/health，只表示 App 还活着）
-//
-// 字段分类:
-//   - 生命周期: Wg（等待所有 goroutine 退出）、Sg（防缓存击穿）、Context（全局上下文）
-//   - 基础信息: Id、Env、Name、Project（用于日志、分布式锁等场景的命名空间隔离）
-//   - 基础组件: 各中间件的客户端实例，按需初始化
-//   - 内部组件: cancelFunc（取消信号）、sharklog（日志组件）、muxServe（pprof HTTP 路由）
+// App 保存应用生命周期状态及已初始化的服务和中间件。
 type App struct {
-	// --- 生命周期管理 ---
-	// Wg 用于等待所有后台 goroutine 完成后再退出
+	// Wg 等待已登记的后台 goroutine。
 	Wg *sync.WaitGroup
-	// Sg singleflight 组，防止并发场景下的缓存击穿（多个请求同时查询同一 key 时只执行一次）
+	// Sg 合并相同 key 的并发请求。
 	Sg *singleflight.Group
-	// Context 应用全局 context，取消时通知所有组件退出
+	// Context 是应用共享的 context。
 	Context context.Context
 
-	// --- 基础信息 ---
-	// Id 实例编号，用于多节点部署时区分不同实例
+	// Id 是实例编号。
 	Id string
-	// Env 运行环境：dev / test / prod
+	// Env 是运行环境。
 	Env string
-	// Name 服务名称
+	// Name 是服务名称。
 	Name string
-	// Project 项目名称，用于日志 topic、定时器 key 等全局命名
+	// Project 是项目名称。
 	Project string
 
-	// --- 基础组件（按需初始化，nil 表示未启用） ---
-	// Db MySQL/GORM 数据库连接
+	// Db 是 MySQL 数据库连接。
 	Db *gorm.DB
-	// Grpc gRPC 服务端实例
+	// Grpc 是 gRPC 服务端。
 	Grpc *sharkgrpc.RpcServer
-	// Minio MinIO 对象存储客户端
+	// Minio 是 MinIO 客户端。
 	Minio *minio.Client
-	// Timer 定时器组件（基于 Redis 分布式锁）
+	// Timer 是定时器组件。
 	Timer *sharktimer.Timer
-	// Kafka Kafka 消息队列客户端
+	// Kafka 是 Kafka 客户端。
 	Kafka *sharkkafka.SharkKafka
-	// RedisCluster Redis 集群模式客户端
+	// RedisCluster 是 Redis 集群客户端。
 	RedisCluster *redis.ClusterClient
-	// RedisClient Redis 单机/主从模式客户端
+	// RedisClient 是 Redis 单机或主从客户端。
 	RedisClient *redis.Client
+	// RedisHelper 提供 Redis 常用操作。
 	RedisHelper *sharkredis.Helper
-	// Logger 结构化日志记录器（基于 zap）
+	// Logger 是结构化日志记录器。
 	Logger *zap.Logger
-	// Elastic Elasticsearch 客户端
+	// Elastic 是 Elasticsearch 客户端。
 	Elastic *sharkelastic.SharkElastic
-	// Etcd etcd 客户端（分布式配置/服务发现）
+	// Etcd 是 etcd 客户端。
 	Etcd *clientv3.Client
-	// Mongodb MongoDB 客户端
+	// Mongodb 是 MongoDB 客户端。
 	Mongodb *mongo.Client
-	// Rabbitmq RabbitMQ 客户端
+	// Rabbitmq 是 RabbitMQ 客户端。
 	Rabbitmq *sharkrabbitmq.Client
-	// RisingWave RisingWave 流数据库连接（复用 GORM）
+	// RisingWave 是 RisingWave 数据库连接。
 	RisingWave *gorm.DB
-	// GinEngine Gin HTTP 引擎（路由注册入口）
+	// GinEngine 是 Gin HTTP 引擎。
 	GinEngine *gin.Engine
-	// SharkWS WebSocket 服务组件
+	// Ws 是 WebSocket 服务组件。
 	Ws *sharkws.SharkWS
-	// AntPool ants 池，用于管理高并发 goroutine
-	// 默认大小由 options.antpool 决定，若为 0 则使用默认值 100
+	// AntPool 管理并发任务。
 	AntPool *ants.Pool
 
-	// --- 内部组件（不对外暴露） ---
-	// cancelFunc 取消 Context，触发优雅关闭
+	// cancelFunc 取消应用 context。
 	cancelFunc context.CancelFunc
-	// sharklog Shark 日志组件封装
+	// sharklog 封装 Shark 日志组件。
 	sharklog *sharklog.SharkLog
-	// muxServe pprof 服务的 HTTP 路由复用器
+	// muxServe 是 pprof HTTP 路由复用器。
 	muxServe *http.ServeMux
 }
 
-// New 根据 Options 创建 App 实例，并初始化所有已配置的中间件连接。
-//
-// 初始化顺序（按代码顺序）:
-//  1. 创建 context 和 WaitGroup
-//  2. 初始化日志组件
-//  3. 连接 Kafka（dev/test 环境自动配置日志写入 Kafka）
-//  4. 连接 Redis（自动探测 cluster/client 模式）
-//  5. 连接 MySQL
-//  6. 连接 Elasticsearch
-//  7. 连接 RabbitMQ（使用 CRC16 哈希选择 broker 节点）
-//  8. 连接 RisingWave
-//  9. 连接 etcd
-//  10. 连接 MongoDB
-//  11. 连接 MinIO
-//  12. 初始化定时器（依赖 Redis）
-//  13. 初始化 gRPC 服务（依赖 Redis）
-//  14. 初始化 HTTP 服务（基于 Gin）
-//  15. 按需启动 pprof、存活探测（/health）
-//
-// 参数:
-//   - options: 应用配置，由 NewOption 或 NewOptionWithRedis 创建
-//
-// 返回值:
-//   - *App: 初始化完成的应用实例
-//   - error: 任一中件间连接失败时返回错误
+// New 根据配置创建 App，并初始化已配置的中间件和服务。
 func New(options *Options) (*App, error) {
 	if options == nil {
 		return nil, fmt.Errorf("options required")
 	}
 
-	// 创建带取消功能的 context，用于全局生命周期控制
 	ctx, cancel := context.WithCancel(context.Background())
 	app := &App{
 		Context:    ctx,
@@ -185,7 +122,6 @@ func New(options *Options) (*App, error) {
 		Sg:         &singleflight.Group{},
 	}
 
-	// 初始化 ants 池
 	antPoolSize := options.antpool
 	if antPoolSize == 0 {
 		antPoolSize = 100
@@ -196,7 +132,6 @@ func New(options *Options) (*App, error) {
 	}
 	app.AntPool = pool
 
-	// 初始化日志组件
 	app.sharklog = sharklog.New(app.Context, app.Name, app.Id)
 	app.Logger = app.sharklog.Zap
 
@@ -210,11 +145,10 @@ func New(options *Options) (*App, error) {
 		app.Kafka = kafka
 		app.Logger.Info("连接kafka成功", zap.Strings("host", options.kafka.Host), zap.String("user", options.kafka.User))
 
-		// 如果启用了 Kafka 日志，则创建对应的 Writer
 		if options.kafkalog {
 			topic := fmt.Sprintf("%v_game_log_%v", app.Project, app.Env)
 			kafkaLogWriter, err := app.Kafka.Writer(topic, &sharkkafka.WriterConfig{
-				Async: sharkutils.Pointer(true), // 异步写入 Kafka，避免阻塞业务日志
+				Async: sharkutils.Pointer(true),
 			})
 			if err != nil {
 				app.Logger.Warn("创建Kafka日志Writer失败，日志仅输出到控制台", zap.Error(err))
@@ -224,9 +158,7 @@ func New(options *Options) (*App, error) {
 		}
 	}
 
-	// ---- Redis 初始化（自动探测 cluster/client 模式） ----
-	// 策略：先尝试以集群模式连接，如果服务端返回"cluster support disabled"，
-	// 则回退到单机/主从模式。这种方式兼容了不同部署形态的 Redis。
+	// 自动模式先尝试集群连接，仅在服务端不支持集群时回退到单机/主从模式。
 	if options.redis != nil {
 		app.Logger.Info("正在连接redis", zap.Strings("host", options.redis.Host))
 		cluster, err := sharkredis.NewCluster(app.Context, options.redis)
@@ -239,7 +171,6 @@ func New(options *Options) (*App, error) {
 			if strings.Contains(errMsg, "cluster support disabled") ||
 				strings.Contains(errMsg, "CLUSTERDOWN") ||
 				strings.Contains(errMsg, "ERR This instance has cluster support disabled") {
-				// 不是集群模式，回退到单机/主从模式
 				client, err := sharkredis.NewClient(app.Context, options.redis)
 				if err != nil {
 					app.Logger.Error("连接redis client失败", zap.Strings("host", options.redis.Host), zap.Error(err))
@@ -249,14 +180,12 @@ func New(options *Options) (*App, error) {
 				app.RedisHelper = sharkredis.NewHelperWithClient(client, app.Project, app.Name)
 				app.Logger.Info("连接redis client成功", zap.Strings("host", options.redis.Host))
 			} else {
-				// 集群模式连接失败（非"不支持集群"的原因，如网络不通、密码错误等）
 				app.Logger.Error("连接redis cluster失败", zap.Strings("host", options.redis.Host), zap.Error(err))
 				return nil, err
 			}
 		}
 	}
 
-	// ---- Redis Cluster 明确配置（独立于自动探测） ----
 	if options.redis_cluster != nil && app.RedisCluster == nil {
 		app.Logger.Info("正在连接redis cluster", zap.Strings("host", options.redis_cluster.Host))
 		redis, err := sharkredis.NewCluster(app.Context, options.redis_cluster)
@@ -269,7 +198,6 @@ func New(options *Options) (*App, error) {
 		app.RedisHelper = sharkredis.NewHelperWithCluster(redis, app.Project, app.Name)
 	}
 
-	// ---- Redis Client 明确配置（独立于自动探测） ----
 	if options.redis_client != nil && app.RedisClient == nil {
 		app.Logger.Info("正在连接redis client", zap.Strings("host", options.redis_client.Host))
 		redis, err := sharkredis.NewClient(app.Context, options.redis_client)
@@ -307,8 +235,7 @@ func New(options *Options) (*App, error) {
 	}
 
 	// ---- RabbitMQ 初始化 ----
-	// 使用服务名称的 CRC16 哈希值来选择连接的 broker 节点。
-	// New 会阻塞到首次连接成功：启动阶段连不上就卡住，起来也没用。
+	// 用服务名称的 CRC16 哈希值选择 broker 节点。
 	if options.rabbitmq != nil {
 		app.Logger.Info("正在连接rabbitmq", zap.Strings("host", options.rabbitmq.Host), zap.String("user", options.rabbitmq.User))
 		mq, err := sharkrabbitmq.New(app.Context, app.Logger, app.Wg, options.rabbitmq, app.Name, app.Id)
@@ -316,7 +243,6 @@ func New(options *Options) (*App, error) {
 			app.Logger.Error("连接rabbitmq失败", zap.Strings("host", options.rabbitmq.Host), zap.Error(err))
 			return nil, err
 		}
-		// CRC16 哈希取模选择 broker 节点
 		if len(options.rabbitmq.Host) > 0 {
 			index := crc16.Checksum([]byte(app.Name), crc16.IBMTable) % uint16(len(options.rabbitmq.Host))
 			app.Logger.Info("连接rabbitmq成功", zap.String("host", options.rabbitmq.Host[index]), zap.String("user", options.rabbitmq.User))
@@ -372,7 +298,6 @@ func New(options *Options) (*App, error) {
 		app.Minio = client
 	}
 
-	// ---- 定时器初始化（依赖 Redis） ----
 	if options.timer {
 		if app.RedisCluster != nil {
 			app.Timer = sharktimer.NewTimer(app.Context, app.Project, app.Name, app.Id, app.RedisCluster, app.Logger)
@@ -385,9 +310,7 @@ func New(options *Options) (*App, error) {
 		}
 	}
 
-	// ---- gRPC 服务初始化（依赖 Redis） ----
 	if options.grpc > 0 {
-		// 端口 > 0：启动 gRPC 监听
 		if app.RedisCluster != nil {
 			server := sharkgrpc.New(app.Context, app.Project, app.RedisCluster, app.Logger, options.grpc)
 			app.Logger.Info("开启rpc服务", zap.Int("port", options.grpc))
@@ -400,7 +323,6 @@ func New(options *Options) (*App, error) {
 			app.Logger.Error("开启rpc服务失败, 依赖redis, 请确保已正确配置redis连接")
 		}
 	} else {
-		// 端口 <= 0：初始化 gRPC 客户端（从 Redis 读其他服务地址，本进程不监听）
 		if app.RedisCluster != nil {
 			server := sharkgrpc.New(app.Context, app.Project, app.RedisCluster, app.Logger, -1)
 			app.Grpc = server
@@ -410,18 +332,15 @@ func New(options *Options) (*App, error) {
 		}
 	}
 
-	// ---- HTTP 服务初始化（基于 Gin） ----
 	if options.http > 0 {
 		app.GinEngine = sharkhttp.New(app.Context, app.Env, app.Logger, options.http)
 		app.Ws = sharkws.NewSharkWS(app.GinEngine)
 		app.Logger.Info("开启http服务", zap.Int("port", options.http))
-		// 开发环境提示 Swagger 文档地址
 		if options.env == "dev" {
 			app.Logger.Debug("swagger url: http://127.0.0.1" + ":" + fmt.Sprint(options.http) + "/swagger/index.html")
 		}
 	}
 
-	// ---- 辅助服务（非核心，异步启动） ----
 	if options.pprof > 0 {
 		go app.pprof(options.pprof)
 	}
@@ -432,17 +351,10 @@ func New(options *Options) (*App, error) {
 	return app, nil
 }
 
-// pprof 启动 Go 性能分析 HTTP 服务。
-//
-// 注册 /debug/pprof/（pprof.Index）。Index 会转发 heap/goroutine 等 runtime profile。
-// CPU profile（/debug/pprof/profile）和 trace 未单独注册。
-//
-// 参数:
-//   - port: 监听端口
+// pprof 在指定端口启动性能分析服务。
 func (a *App) pprof(port int) {
 	a.Logger.Info("开启pprof服务", zap.Int("port", port))
 	a.muxServe = http.NewServeMux()
-	// 注册 pprof 路由（使用标准库的 pprof.Index）
 	a.muxServe.HandleFunc("/debug/pprof/", pprof.Index)
 	err := http.ListenAndServe(fmt.Sprintf(":%v", port), a.muxServe)
 	if err != nil {
@@ -450,13 +362,7 @@ func (a *App) pprof(port int) {
 	}
 }
 
-// health_service 启动进程存活探测 HTTP 服务。
-//
-// 只表示本进程 HTTP 端口还能接受请求，不检查 DB/Redis 等中间件。
-// 用于 Kubernetes liveness（探 App 是否存活），不要当成 readiness/依赖探活。
-//
-// 参数:
-//   - port: 监听端口
+// health_service 在指定端口提供进程存活探测，不检查中间件状态。
 func (a *App) health_service(port int) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(writer http.ResponseWriter, request *http.Request) {
@@ -471,92 +377,49 @@ func (a *App) health_service(port int) {
 	}
 }
 
-// AppComponent 定义了应用组件的启动接口。
-//
-// 实现了此接口的类型可以在 Hunt 启动时被调用 Start()
-// 来初始化自己的后台任务（如消费 Kafka 消息、启动定时任务等）。
+// AppComponent 是可由 Hunt 启动的应用组件。
 type AppComponent interface {
-	// Start 启动组件的后台任务，通常以阻塞方式运行
+	// Start 启动组件。
 	Start()
 }
 
-// Hunt 启动业务组件并阻塞直到收到退出信号。
-//
-// App 是常驻进程，Hunt 不是完整的资源回收流程：
-// 不关闭 HTTP/gRPC，不 Close 各中间件连接；Go() 也不登记 WaitGroup。
-//
-// 执行流程:
-//  1. 依次启动所有传入的 AppComponent
-//  2. 若已创建 gRPC Server 则 Run 监听
-//  3. 打印启动 banner
-//  4. 阻塞等待 SIGTERM 或 SIGINT
-//  5. cancel context，等待 500ms，Wg.Wait()（仅等待主动登记过的 goroutine）
-//  6. 关闭日志 Kafka Writer
-//
-// 参数:
-//   - components: 需要在启动时初始化的应用组件列表
-func (a *App) Hunt(components ...AppComponent) {
-	// 依次启动所有组件
-	for _, c := range components {
-		c.Start()
-	}
-	if a.Grpc != nil {
-		a.Grpc.Run()
-	}
-	// 打印启动横幅
-	a.banner()
-
-	// 监听系统信号（SIGTERM 来自 kill 命令，SIGINT 来自 Ctrl+C）
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
-	// 阻塞等待信号
-	<-sig
-
-	// 收到退出信号后，取消 context 通知所有组件退出
-	a.cancelFunc()
-	// 等待 500ms 让正在处理的请求完成
-	time.Sleep(time.Millisecond * 500)
-	// 等待所有注册的 goroutine 完成
-	a.Wg.Wait()
-	a.Logger.Debug("****************server exit****************")
-	// 优雅关闭日志组件（Kafka Writer）
-	a.sharklog.Close()
-}
-
-// banner 打印服务启动日志。
-// 注释掉的 ASCII Art 是一个 "SHARK HUNTING" 的横幅，
-// 保留以便后续需要时启用。
+// banner 记录服务启动信息。
 func (a *App) banner() {
 	hostName, _ := os.Hostname()
 	a.Logger.Info("shark running", zap.String("name", a.Name), zap.String("id", a.Id), zap.String("env", a.Env), zap.String("host", hostName))
 	a.Logger.Info("****************server start****************")
 }
 
-// Go 安全地启动一个后台 goroutine，自动捕获 panic 并记录日志。
-//
-// App 按常驻进程设计，Go 不登记 WaitGroup（Hunt 不以排空全部后台任务为目标）。
-//
-// 与直接使用 go 关键字不同，此方法会：
-//   - 自动在 defer 中 recover panic，防止单个 goroutine 崩溃导致整个程序退出
-//   - 将 panic 信息和完整调用栈记录到日志中
-//   - 自动传入 app.Context 作为函数参数
-//
-// 参数:
-//   - fn: 需要在后台 goroutine 中执行的函数，接收 app.Context 作为参数
-//
-// 使用示例:
-//
-//	app.SafeGo(func(ctx context.Context) {
-//	    // 后台任务，panic 不会导致程序崩溃
-//	})
-func (a *App) SafeGo(fn func(ctx context.Context)) {
+// Hunt 启动组件并阻塞至收到退出信号，然后取消应用 context 并等待已登记的 goroutine。
+func (a *App) Hunt(components ...AppComponent) {
+	for _, c := range components {
+		c.Start()
+	}
+	if a.Grpc != nil {
+		a.Grpc.Run()
+	}
+	a.banner()
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	<-sig
+
+	a.cancelFunc()
+	time.Sleep(time.Millisecond * 500)
+	a.Wg.Wait()
+	a.Logger.Debug("****************server exit****************")
+	a.sharklog.Close()
+}
+
+// SafeGo 在后台执行 fn，并恢复 panic、记录错误。
+// args 会原样传递给 fn；启动的 goroutine 不会登记到 Wg。
+func (a *App) SafeGo(fn func(args ...any), args ...any) {
 	if fn == nil {
 		return
 	}
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				// 记录 panic 信息和完整调用栈
 				if a.Logger != nil {
 					a.Logger.Error("panic in go routine", zap.Any("panic", r), zap.String("stack", string(debug.Stack())))
 				} else {
@@ -564,6 +427,25 @@ func (a *App) SafeGo(fn func(ctx context.Context)) {
 				}
 			}
 		}()
-		fn(a.Context)
+		fn(args...)
 	}()
+}
+
+// SafeFunction 返回一个会恢复 panic 并记录错误的 fn 包装函数。
+func (a *App) SafeFunction(fn func()) func() {
+	if fn == nil {
+		return nil
+	}
+	return func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if a.Logger != nil {
+					a.Logger.Error("panic in function", zap.Any("panic", r), zap.String("stack", string(debug.Stack())))
+				} else {
+					fmt.Printf("panic in function: %v\n%s", r, string(debug.Stack()))
+				}
+			}
+		}()
+		fn()
+	}
 }
