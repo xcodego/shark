@@ -495,7 +495,6 @@ func (a *App) ParallelCall(funcs ...func() error) error {
 	}
 	var wg sync.WaitGroup
 	ch := make(chan error, len(funcs))
-
 	for _, fn := range funcs {
 		if fn == nil {
 			continue
