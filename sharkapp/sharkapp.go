@@ -122,16 +122,27 @@ func New(options *Options) (*App, error) {
 		Wg:         &sync.WaitGroup{},
 		Sg:         &singleflight.Group{},
 	}
-
-	antPoolSize := options.antpool
-	if antPoolSize == 0 {
-		antPoolSize = 100
+	if options.antpool > 0 {
+		pool, err := ants.NewPool(options.antpool)
+		if err != nil {
+			return nil, fmt.Errorf("创建 ants 池失败: %w", err)
+		}
+		app.AntPool = pool
+	} else {
+		pool, err := ants.NewPool(
+			-1,
+			ants.WithExpiryDuration(time.Minute),
+			ants.WithPanicHandler(func(v any) {
+				if app.Logger != nil {
+					app.Logger.Error("sharkapp ants worker panic", zap.Any("panic", v))
+				}
+			}),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("创建 ants 池失败: %w", err)
+		}
+		app.AntPool = pool
 	}
-	pool, err := ants.NewPool(antPoolSize)
-	if err != nil {
-		return nil, fmt.Errorf("创建 ants 池失败: %w", err)
-	}
-	app.AntPool = pool
 
 	app.sharklog = sharklog.New(app.Context, app.Name, app.Id)
 	app.Logger = app.sharklog.Zap
@@ -414,29 +425,23 @@ func (a *App) Hunt(components ...AppComponent) {
 
 func (a *App) RunInPool(fn func(args ...any), args ...any) {
 	if fn == nil {
-		a.Logger.Warn("RunInPool nil function provided")
+		a.Logger.Error("RunInPool nil function provided")
 		return
 	}
 	if a.AntPool == nil {
 		a.Logger.Error("RunInPool AntPool is nil")
 		return
 	}
-	a.Wg.Add(1)
-	go func() {
-		defer a.Wg.Done()
+	a.AntPool.Submit(func() {
 		defer func() {
 			if r := recover(); r != nil {
 				if a.Logger != nil {
 					a.Logger.Error("RunInPool panic in go routine", zap.Any("panic", r), zap.String("stack", string(debug.Stack())))
-				} else {
-					fmt.Printf("RunInPool panic in go routine: %v\n%s", r, string(debug.Stack()))
 				}
 			}
 		}()
-		a.AntPool.Submit(func() {
-			fn(args...)
-		})
-	}()
+		fn(args...)
+	})
 }
 
 // WithTimeout 在指定时间内执行 fn；超时或 parent 被取消时返回 ErrTimeout。
@@ -521,4 +526,21 @@ func (a *App) ParallelCall(funcs ...func() error) error {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+func (a *App) SafeGo(fn func(args ...any)) {
+	if fn == nil {
+		a.Logger.Error("RunInPool nil function provided")
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if a.Logger != nil {
+					a.Logger.Error("SafeGo panic in go routine", zap.Any("panic", r), zap.String("stack", string(debug.Stack())))
+				}
+			}
+		}()
+		fn()
+	}()
 }

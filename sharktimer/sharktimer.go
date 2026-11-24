@@ -44,7 +44,7 @@ import (
 //   - ZAdd: 添加成员（注册新的定时任务）
 type TimerRedis interface {
 	ZRangeByScoreWithScores(ctx context.Context, key string, opt *redis.ZRangeBy) *redis.ZSliceCmd
-	ZRem(ctx context.Context, key string, members ...interface{}) *redis.IntCmd
+	ZRem(ctx context.Context, key string, members ...any) *redis.IntCmd
 	ZAdd(ctx context.Context, key string, members ...redis.Z) *redis.IntCmd
 }
 
@@ -168,7 +168,7 @@ func (t *Timer) processTimer() {
 				time.Sleep(time.Second)
 				continue
 			}
-			members := make([]interface{}, 0, len(result))
+			members := make([]any, 0, len(result))
 			for _, v := range result {
 				members = append(members, v.Member)
 			}

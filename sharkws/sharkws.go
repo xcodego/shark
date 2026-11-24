@@ -153,7 +153,7 @@ func (s *SharkWS) Listen(path string) {
 // GetConnects 返回当前连接 ID 列表。
 func (s *SharkWS) GetConnects() []int {
 	conns := []int{}
-	s.connects.Range(func(key, value interface{}) bool {
+	s.connects.Range(func(key, value any) bool {
 		conns = append(conns, key.(int))
 		return true
 	})

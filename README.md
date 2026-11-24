@@ -34,6 +34,44 @@ Shark 封装了微服务开发中常见的中间件和工具库，提供统一�
 go get github.com/xcodego/shark
 ```
 
+### Go 源码检查
+
+`sharklint` 可独立检查指定目录，不依赖 Shark 应用初始化：
+
+```bash
+go install github.com/xcodego/shark/sharklint/cmd/sharklint@latest
+sharklint /path/to/project
+```
+
+检查器输出违规的文件、行号和列号。发现违规或检查错误时退出码为 1，参数错误时为 2。
+
+`sharklint/go/` 下是通用 Go 语言规则：
+
+- `any`：递归扫描所有非测试 `.go` 文件（包括 vendor 和不满足当前构建条件的文件），不跟随符号链接，禁止使用 `interface{}`，请改用 `any`。
+- `beego`：禁止导入 Beego 框架包，包括 `github.com/beego/beego` 和 `github.com/astaxie/beego` 的所有版本及子包。
+- `format`：递归检查所有 `.go` 文件（包括测试文件和被构建标签排除的文件），不跟随符号链接，文件必须与 `gofmt` 输出一致。
+- `vet`：在目标目录运行 `go vet ./...`，检查当前构建条件下的 Go 包；目录没有 Go 文件时跳过。
+- `goroutine`：递归扫描所有非测试 `.go` 文件（包括 vendor 和不满足当前构建条件的文件），不跟随符号链接，禁止直接使用 `go` 启动协程。
+- `panic`：递归扫描所有非测试 `.go` 文件，不跟随符号链接，禁止直接调用内置 `panic`（`package main` 的入口函数 `main` 除外）。
+- `maprace`：通过类型信息检查当前构建条件下的非测试 Go 包，检查直接 `go func(...)` 和 `sharkapp.App.SafeGo` 的函数字面量捕获的 map 的索引读写、`delete`、`clear`、`len` 和遍历；也比较同一函数中启动后的访问和其他异步闭包。单纯的并发只读不报告；共享 map 的异步写入若未持有 `sync.Mutex` 或 `sync.RWMutex` 的写锁会报告，互相冲突的访问须持有同一个锁（读操作允许读锁）。控制流分支合并时仅认可所有路径均持有的锁。检查采用保守近似，异步写入即使实际只执行一次也可能报告；不识别同步等待、channel、跨函数调用、map 或锁的别名、闭包参数传入的 map、间接调用、其他协程池和自定义锁，不能替代 `go test -race`。仅分析函数声明内的直接异步闭包，不追踪嵌套函数、复杂 map 表达式或 map 重新赋值，启动位置之前的访问不考虑循环下一次迭代；需要 Go 模块或工作区，不检查其他构建条件、vendor 和嵌套模块。
+- `syncpair`：通过类型信息和函数内控制流检查 `sync.Mutex` / `sync.RWMutex` 的 `Lock`、`Unlock` 和 `RLock`、`RUnlock` 配对，及局部 `sync.WaitGroup` 的常量 `Add`、`Done` 配对；检查返回或显式 panic 路径，并识别直接 `defer` 释放。WaitGroup 支持直接 `go func` 和 `sharkapp.App.SafeGo` 闭包捕获的 `Done` 或负数 `Add`，检查闭包分支是否遗漏完成操作，以及 `Wait` 前是否存在未完成的计数。检查为近似分析，不推断分支条件之间的关系，可能误报；计数上限为 64。WaitGroup 被传给其他函数、被其他回调捕获、使用动态或超出 ±64 的 Add，或在工作闭包中增加计数时不检查该对象；不追踪别名、重新赋值、闭包参数、跨函数完成、嵌套协程、自定义协程池或 defer 闭包。使用 `TryLock` / `TryRLock` 的锁不检查；锁通过参数或字段在函数间转移、间接调用和复杂接收者也无法可靠分析；仅在函数内有获取操作或锁为局部变量时报告多余释放。需要 Go 模块或工作区，不检查其他构建条件、vendor 和嵌套模块。
+- `logging`：禁止使用 `fmt.Print*`、导入 `log`/`log/slog` 或使用 zap 全局 Logger；业务代码应使用注入的 `*zap.Logger`。只有 `sharklog.New` 可创建 Logger；`sharkdb/binloglistener.go` 中为 go-mysql 提供的 `log/slog` 适配除外，检查器命令的格式化输出不作为日志处理。
+- `swagger`：仅检查 Gin 和 `net/http` 的 POST 路由是否关联 Swagger handler 文档，校验 `@Router` 路径和方法、路径参数、请求体绑定类型、`@Success` 类型，并要求请求/响应结构体的具名字段有注释；嵌入结构体成员本身可不写注释，但会递归检查其内部字段。可识别 Gin `Group` 前缀及字符串常量路由；成功响应类型比对覆盖 handler 中直接调用 Gin JSON 响应的方法，Shark 的 `sharkerror.Error` 可作为 HTTP 200 错误响应与成功响应并存。动态路由会报告无法静态校验；间接响应和外部依赖结构体字段无法验证。
+
+`redis` 规则单独位于 `sharklint/redis/`：
+
+- 通过类型信息检查当前构建条件下的非测试 Go 包，禁止 `KEYS`、`FLUSHALL`、`FLUSHDB`、`CONFIG`、`DEBUG`、`SHUTDOWN`、`SAVE`、`BGSAVE`、`BGREWRITEAOF`、`REPLICAOF`、`SLAVEOF`、`SWAPDB`、`MIGRATE`、`MONITOR`、`CLIENT KILL` 和 `CLIENT PAUSE`；`KEYS` 建议使用 `SCAN` 替代。支持 go-redis（v6、v7、v8、v9）和 rueidiscompat 的命令方法、`Do`、`DoRaw`、`DoRawWriteTo` 及 go-redis 的 `New*Cmd`，Redigo 的 `Do`、`Send`、`DoContext` 和 `DoWithTimeout`，以及 Rueidis 的命令构造器和 `Builder.Arbitrary`。原生命令的命令名及 `CLIENT` 子命令须为字符串常量；动态生成的命令名、重新声明的自定义接口方法和间接函数调用无法静态识别。此检查依赖 Go 包加载，目录需属于 Go 模块或工作区；不检查其他构建条件、vendor 和嵌套模块。
+- Redis key 禁止直接使用字符串字面量、字符串拼接、类型转换以及 `fmt.Sprint*`、`strings` 或 `strconv` 的字符串构造结果。检查同一函数内的局部赋值、分支和循环，追踪切片和 map 别名、元素修改及 `append`；分支合并和无法确定的切片下标采用保守分析。函数参数、包级常量及自定义函数返回值允许使用，不检查自定义函数内部的数据流。支持上述客户端的常见 key 参数、部分结构体 key 字段及常见原生命令；`Do`、`DoRaw`、`DoRawWriteTo`、`Send`、`DoContext` 和 `DoWithTimeout` 支持局部命令名和局部切片展开。`EVAL` / `FCALL` 等命令按照 key 数量判断参数；数量无法确定时，数量之后的参数会保守视为可能的 key。无法确定的命令、未知原生命令、间接调用、跨函数数据流、结构体修改及通过函数修改的容器不在检查范围。
+
+`sql`：通过类型信息检查当前构建条件下的非测试 Go 包。禁止 `database/sql` 的查询、执行及预编译和 GORM 的 `Raw`、`Exec`；GORM 条件、连接和 `Expr` 禁止手写或拼接 SQL，使用 `sharksql` 构建器。GORM 表名、字段名、条件及创建和更新 map 的键以及 `sharksql` 字段名、表名和别名须直接使用 `app/gconst` 包中的常量（import 路径为 `app/gconst` 或以 `/app/gconst` 结尾）；支持使用构建器表达式、常量键 map 和字段列表。map 变量须在同一文件中由字面量初始化，所有索引赋值的键均须为常量；重新赋值或赋予别名的 map 不予认可。`sharksql.Case`、`CaseAs`、`When`、`WhenAs` 接受原始 SQL 表达式，因此也禁止使用。检查需在 Go 模块或工作区中运行，不检查其他构建条件、vendor、嵌套模块、间接函数调用、自定义数据库接口及其他数据库库。结构体标签、通过函数调用或其他间接方式修改的 map 内容及跨函数数据流不在检查范围；未知字符串条件会被拒绝，构建器结果保存到局部变量时只接受没有其他赋值的变量。
+
+事务检查支持 `database/sql` 的 `Begin`、`BeginTx` 和 GORM 的 `Begin`、直接传入函数字面量的 `Transaction`。对手动开启的事务，检查成功路径是否注册 `defer tx.Rollback()`，以及返回或 panic 路径是否提交或回滚；无条件显式回滚也不能替代 defer 要求。事务期间检查嵌套开启事务、gRPC 客户端方法和 `net/http` 客户端请求、`time.Sleep` 和阻塞的 `time.After`/`Timer.C`/`Ticker.C` 接收、未检查错误的数据修改，以及直接丢弃查询结果（GORM 查询仅在目标为 `nil` 且返回值被丢弃时报告）。等待和查询检查仅覆盖上述可识别形式，不能判断任意操作的执行时间或业务上是否需要查询。
+
+事务进行期间，禁止通过非事务连接执行数据库操作：检查 `database/sql` 的 `DB`、`Conn` 及由它们预编译的局部 `Stmt`，以及 GORM 的查询、写入和迁移操作。GORM 连接检查在函数内追踪事务连接的局部别名和链式调用，并保守合并分支；事务结束后不再检查。`database/sql` 的事务 `Stmt` 可通过 `tx.Prepare` 或 `tx.Stmt` 获得。未知来源的 `Stmt` 不报告；无法确定为事务连接的 GORM 值（例如结构体字段或函数返回值）按非事务连接处理，可能误报。跨函数数据流和间接数据库调用无法可靠追踪。
+
+事务生命周期等其他检查使用函数内控制流和类型信息，不追踪事务别名、跨函数调用、间接调用、事务转移给调用方或 defer 闭包内的回滚；GORM 自动事务仅分析直接传入的回调。错误检查为语法级近似：识别错误的比较或返回，及 GORM 结果的 `Error` 字段比较或返回，不保证每条路径都处理错误，也不识别所有自定义错误处理方式。无法确定的分支按可能执行分析，短路表达式和复杂条件可能产生误报。
+
+在违规代码的上一行添加 `// force ignore sharklint: any`、`// force ignore sharklint: goroutine`、`// force ignore sharklint: logging`、`// force ignore sharklint: maprace`、`// force ignore sharklint: panic`、`// force ignore sharklint: syncpair`、`// force ignore sharklint: redis`、`// force ignore sharklint: sql` 或 `// force ignore sharklint: swagger` 可以分别忽略对应规则。也可以在 Go 程序中调用 `sharklint.Lint(path)`；提供 `Violation` 类型的规则可通过 `errors.As` 获取。`go vet` 的诊断输出会附在返回错误中，相对文件路径会转换为绝对路径；包加载、类型检查、文件系统和 Go 解析错误也会被报告。
 ### 配置文件
 
 在项目根目录创建 `config/config.yaml`：

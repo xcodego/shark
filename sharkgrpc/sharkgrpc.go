@@ -42,7 +42,7 @@ var connections sync.Map
 //   - Set: 写入服务地址列表
 type RpcRedis interface {
 	Get(ctx context.Context, key string) *redis.StringCmd
-	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd
+	Set(ctx context.Context, key string, value any, expiration time.Duration) *redis.StatusCmd
 }
 
 // connection 表示一个 gRPC 客户端连接，包含底层连接和动态地址解析器。

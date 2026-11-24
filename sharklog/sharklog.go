@@ -101,7 +101,7 @@ type logWriter struct {
 	locker    sync.Mutex
 }
 
-// Write 将日志写入 Kafka；未配置 Writer 时忽略，写入失败时输出错误但不返回。
+// Write 将日志写入 Kafka；未配置 Writer 时忽略，写入失败时返回错误给 zap。
 func (w *logWriter) Write(p []byte) (n int, err error) {
 	w.locker.Lock()
 	defer w.locker.Unlock()
@@ -115,12 +115,11 @@ func (w *logWriter) Write(p []byte) (n int, err error) {
 		}
 		b, e := sonic.Marshal(data)
 		if e != nil {
-			fmt.Println("日志序列化失败", e, "日志内容", string(p))
-			return len(p), e
+			return 0, e
 		}
 		err := w.writer.WriteMessages(w.ctx, kafka.Message{Value: b})
 		if err != nil {
-			fmt.Println("日志写入Kafka失败", err, "日志内容", string(p))
+			return 0, err
 		}
 	}
 	return len(p), nil

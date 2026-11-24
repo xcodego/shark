@@ -578,7 +578,7 @@ func (h *Helper) HGetObject(ctx context.Context, key string, value any, fields .
 			if vals[i] == nil {
 				continue // 该 field 不存在，跳过
 			}
-			// HMGET 返回值类型是 []interface{}，可能为 string 或 []byte
+			// HMGET 返回值类型是 []any，可能为 string 或 []byte
 			switch v := vals[i].(type) {
 			case string:
 				m[field] = v
@@ -749,7 +749,7 @@ func (h *Helper) HMGetToMap(ctx context.Context, key string, fields ...string) (
 		if vals[i] == nil {
 			continue
 		}
-		// 将值转为 string（HMGET 返回 []interface{}，每个元素可能是 string 或 []byte）
+		// 将值转为 string（HMGET 返回 []any，每个元素可能是 string 或 []byte）
 		switch v := vals[i].(type) {
 		case string:
 			result[field] = v

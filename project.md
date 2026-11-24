@@ -38,6 +38,7 @@ app.Hunt(&Test{svc: app})
 | 包 | 用途 | 关键导出 |
 |---|---|---|
 | `sharkapp` | **应用启动核心** | `App`(所有客户端聚合体)、`New`、`NewOption`(加载 config.yaml)、`Hunt`(启动并阻塞等信号)、`Go`(安全 goroutine) |
+| `sharklint` | Go 源码检查 | `Lint`(检查空接口写法、gofmt 格式、go vet、直接启动协程、panic 调用、异步闭包中的共享 map、日志记录、Redis 禁用命令、SQL 使用规范和 POST 路由 Swagger 文档) |
 | `sharklog` | 双通道日志(控制台+Kafka) | `SharkLog`、`New`、`SetKafkaWriter` |
 | `sharkdb` | MySQL GORM 封装 | `NewDb`、`SharkTable`(链式查询)、`TableScan`(Keyset 游标分页) |
 | `sharksql` | SQL 条件构建器 + 40+ 函数 | `SqlBuilder`、`NewSql`、`PageQuery[T]`、`IsDuplicateKey` |
@@ -271,6 +272,26 @@ sharkdecimal.Normalize(v, precision)
 |---|---|
 | `sharkapp/sharkapp.go` | `App` 结构体(聚合所有中间件客户端)、`New()` 初始化流程、`Hunt()` 启动并阻塞、`AppComponent` 接口、`Go()` 安全 goroutine |
 | `sharkapp/option.go` | `Options` 配置结构体、`NewOption()` 加载 config.yaml、环境变量覆盖、RSA 密码解密、`WithXxx` 链式配置方法 |
+
+### sharklint — Go 源码检查
+
+| 文件 | 说明 |
+|---|---|
+| `sharklint/sharklint.go` | 运行所有源码检查 |
+| `sharklint/go/any/` | 禁止使用 `interface{}`，要求改用 `any` |
+| `sharklint/go/beego/` | 禁止导入 Beego 框架包 |
+| `sharklint/go/format/` | 检查 Go 文件是否经过 gofmt 格式化 |
+| `sharklint/go/vet/` | 对目标目录运行 `go vet ./...` |
+| `sharklint/go/goroutine/` | 检查直接使用 go 启动协程 |
+| `sharklint/go/panic/` | 禁止直接调用内置 `panic`（入口 `main` 函数除外） |
+| `sharklint/go/maprace/` | 检查直接异步闭包捕获的 map 是否缺少互斥锁保护 |
+| `sharklint/go/syncpair/` | 检查锁及局部 WaitGroup 操作的配对和遗漏释放路径 |
+| `sharklint/go/logging/` | 禁止直接打印日志、导入 `log`/`log/slog` 或使用全局 zap.Logger，要求注入 Logger 对象（仅 `sharklog.New` 可创建 Logger；保留 go-mysql 所需的 slog 适配） |
+| `sharklint/go/unreachable/` | 检查不可达代码 |
+| `sharklint/redis/` | 检查 Redis 客户端的禁用命令及直接构造的 key |
+| `sharklint/sql/` | 检查手写 SQL 及表名、字段名常量 |
+| `sharklint/cmd/sharklint/main.go` | 检查器命令行入口 |
+| `sharklint/cmd/sharklint/main_test.go` | 命令行入口测试 |
 
 ### sharklog — 日志
 
