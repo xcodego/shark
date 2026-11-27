@@ -76,6 +76,8 @@ func (s *SharkLog) SetKafkaWriter(writer *kafka.Writer) {
 
 // Close 关闭 Kafka Writer，调用前应确保业务日志已全部写出；之后日志只输出到控制台。
 func (s *SharkLog) Close() {
+	// 先刷出 zap 缓冲；终端和管道对 stdout 的 Sync 常返回错误，可忽略。
+	_ = s.Zap.Sync()
 	s.writer.locker.Lock()
 	defer s.writer.locker.Unlock()
 	if s.writer.writer == nil {

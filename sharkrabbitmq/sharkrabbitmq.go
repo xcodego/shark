@@ -41,6 +41,9 @@ type Client struct {
 	id            string          // 实例 id，与 name 组成消费者标签 name.id
 	closeLock     sync.Mutex      // 保护 publish 通道的发送与关闭
 	connectionCtx context.Context // 当前连接的生命周期，连接断开时取消，用于通知消费协程重建
+	cancel        context.CancelFunc
+	drained       chan struct{} // publish_msg 退出（发布队列处理完）后关闭，connect 据此才关闭连接
+	connDone      chan struct{} // connect 协程退出（连接已关闭）后关闭，Close 据此等待
 }
 
 // publishMsg 是等待异步发送的消息。
@@ -52,18 +55,22 @@ type publishMsg struct {
 
 // New 按服务名的 CRC16 结果从 config.Host 中选定一个 broker，并阻塞重试直到首次连接成功，
 // 因此不会返回 error（启动阶段连不上 broker 继续运行也没有意义）。
-// 之后连接断开会自动重连，ctx 取消后停止重连并关闭发布通道；wg 用于等待发布协程退出。
-// config.Host 不能为空。
+// 之后连接断开会自动重连。ctx 取消（或调用 Close）后停止重连和消费，发布队列处理完再关闭连接；
+// wg 用于等待发布协程退出。config.Host 不能为空。
 func New(ctx context.Context, logger *zap.Logger, wg *sync.WaitGroup, config *Config, name string, id string) (*Client, error) {
 	index := crc16.Checksum([]byte(name), crc16.IBMTable)
 	index = index % uint16(len(config.Host))
+	ctx, cancel := context.WithCancel(ctx)
 	client := &Client{
-		config: config,
-		ctx:    ctx,
-		wg:     wg,
-		logger: logger,
-		name:   name,
-		id:     id,
+		config:   config,
+		ctx:      ctx,
+		cancel:   cancel,
+		wg:       wg,
+		logger:   logger,
+		name:     name,
+		id:       id,
+		drained:  make(chan struct{}),
+		connDone: make(chan struct{}),
 	}
 	client.publish = make(chan publishMsg, 100000)
 	innerwg := &sync.WaitGroup{}
@@ -74,6 +81,15 @@ func New(ctx context.Context, logger *zap.Logger, wg *sync.WaitGroup, config *Co
 	go client.publish_msg()
 	go client.exit_waiting()
 	return client, nil
+}
+
+// Close 停止重连和消费，等待发布队列处理完毕并关闭连接后返回。可重复调用。
+//
+// 队列里未发出的消息会在连接关闭前尽力发送；ctx 取消后发布失败的消息会被丢弃并记录日志。
+// Close 之后 Publish 返回错误。ctx 被外部取消时效果相同，Close 只是额外等待连接关闭。
+func (c *Client) Close() {
+	c.cancel()
+	<-c.connDone
 }
 
 // exit_waiting 等待 context 取消后关闭发布通道，使 publish_msg 处理完剩余消息后退出。
@@ -122,6 +138,7 @@ func (c *Client) set_channel(channel *amqp.Channel) {
 
 // connect 连接 Host[index] 并在连接关闭后持续重连，首次连接成功时通过 wg.Done 通知 New。
 func (c *Client) connect(index int, wg *sync.WaitGroup) {
+	defer close(c.connDone)
 	count := 0
 	for {
 		if c.ctx.Err() != nil {
@@ -165,6 +182,8 @@ func (c *Client) connect(index int, wg *sync.WaitGroup) {
 		select {
 		case <-c.ctx.Done():
 			cancel()
+			// 发布队列还在用这条连接，处理完才能关闭，否则剩余消息只能丢弃。
+			<-c.drained
 			conn.Close()
 			return
 		case e := <-connErr:
@@ -177,18 +196,17 @@ func (c *Client) connect(index int, wg *sync.WaitGroup) {
 	}
 }
 
-// publish_msg 异步发送缓冲消息：发送失败或暂无连接时每秒重试；仅当上下文已取消且无连接时丢弃消息并记录日志。
+// publish_msg 异步发送缓冲消息：发送失败或暂无连接时每秒重试。
+// 上下文取消后不再重试：无连接或发送失败的消息直接丢弃并记录日志，保证关闭过程有限时间内结束。
+// 退出时关闭 drained，通知 connect 可以关闭连接。
 func (c *Client) publish_msg() {
 	defer c.wg.Done()
+	defer close(c.drained)
 	for msg := range c.publish {
 		for {
 			ch := c.get_channel()
 			if c.ctx.Err() != nil && ch == nil {
-				c.logger.Error("消息丢失: Rabbitmq连接已关闭且上下文已结束",
-					zap.String("exchange", msg.exchange),
-					zap.String("key", msg.key),
-					zap.ByteString("value", msg.value.Body),
-				)
+				c.logLost(msg)
 				break
 			}
 			if ch == nil {
@@ -197,12 +215,25 @@ func (c *Client) publish_msg() {
 			}
 			err := ch.Publish(msg.exchange, msg.key, false, false, *msg.value)
 			if err != nil {
+				if c.ctx.Err() != nil {
+					c.logLost(msg)
+					break
+				}
 				time.Sleep(time.Second)
 				continue
 			}
 			break
 		}
 	}
+}
+
+// logLost 记录一条因客户端关闭而未能发出的消息。
+func (c *Client) logLost(msg publishMsg) {
+	c.logger.Error("消息丢失: Rabbitmq连接已关闭且上下文已结束",
+		zap.String("exchange", msg.exchange),
+		zap.String("key", msg.key),
+		zap.ByteString("value", msg.value.Body),
+	)
 }
 
 // Consume 异步消费指定队列，立即返回。
@@ -402,11 +433,13 @@ func (c *Client) Publish(exchange string, key string, value any) error {
 			Body:        []byte(body),
 		},
 	}
+	c.closeLock.Lock()
+	defer c.closeLock.Unlock()
+	// 必须持锁后检查：发布通道只会在 ctx 取消之后、持同一把锁时关闭，
+	// 这里检查通过就说明通道仍然打开。
 	if c.ctx.Err() != nil {
 		return fmt.Errorf("client is closed")
 	}
-	c.closeLock.Lock()
-	defer c.closeLock.Unlock()
 	select {
 	case c.publish <- msg:
 		return nil

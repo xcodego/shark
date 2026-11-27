@@ -61,3 +61,12 @@ func New(ctx context.Context, config *Config) (*Client, error) {
 		Elastic: client,
 	}, nil
 }
+
+// Close 关闭底层 Elasticsearch 客户端及其传输层，ctx 控制最长等待时间。
+// 只应调用一次，重复调用返回 elasticsearch.ErrAlreadyClosed；关闭后的请求会失败。
+func (s *Client) Close(ctx context.Context) error {
+	if s == nil || s.Elastic == nil {
+		return nil
+	}
+	return s.Elastic.Close(ctx)
+}

@@ -42,6 +42,9 @@ func (t *Test) Start() {
 	go t.Test()
 }
 
+// Stop 在应用退出时由 Hunt 调用，需要清理的资源在这里释放。
+func (t *Test) Stop() {}
+
 // Test 是示例业务入口，留空供使用者填充。
 func (t *Test) Test() {
 

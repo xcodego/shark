@@ -119,6 +119,19 @@ func NewDb(ctx context.Context, logger *zap.Logger, config *Config) (*gorm.DB, e
 	return db, err
 }
 
+// Close 关闭 db 底层的连接池；db 为 nil 时返回 nil。
+// 适用于任意 *gorm.DB，包括 sharkrisingwave.New 返回的连接。关闭后不要再使用 db。
+func Close(db *gorm.DB) error {
+	if db == nil {
+		return nil
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("get sql.DB failed: %w", err)
+	}
+	return sqlDB.Close()
+}
+
 // log 将 GORM 日志适配到 zap。
 type log struct {
 	logger *zap.Logger     // zap 日志记录器

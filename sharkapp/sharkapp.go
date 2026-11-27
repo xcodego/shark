@@ -95,8 +95,10 @@ type App struct {
 	Rabbitmq *sharkrabbitmq.Client
 	// RisingWave RisingWave 数据库连接。
 	RisingWave *gorm.DB
-	// GinEngine Gin HTTP 引擎。
+	// GinEngine Gin HTTP 引擎，与 HttpServer.Engine 相同。
 	GinEngine *gin.Engine
+	// HttpServer HTTP 服务，持有 GinEngine，Close 时据此优雅关闭。
+	HttpServer *sharkhttp.Server
 	// Ws WebSocket 服务组件。
 	Ws *sharkws.Server
 	// AntPool 并发任务协程池。
@@ -108,7 +110,18 @@ type App struct {
 	sharklog *sharklog.SharkLog
 	// pprofServe pprof 的 HTTP 路由复用器。
 	pprofServe *http.ServeMux
+	// pprofServer pprof 的 HTTP 服务，未启用时为 nil。
+	pprofServer *http.Server
+	// healthServer 存活探测的 HTTP 服务，未启用时为 nil。
+	healthServer *http.Server
 }
+
+const (
+	// shutdownTimeout 是关闭 HTTP 服务时等待在途请求处理完的最长时间。
+	shutdownTimeout = 10 * time.Second
+	// closeTimeout 是关闭协程池、Elasticsearch、MongoDB 时的最长等待时间。
+	closeTimeout = 5 * time.Second
+)
 
 // New 根据 Options 创建 App，并初始化已配置的中间件和服务。
 //
@@ -376,8 +389,9 @@ func New(options *Options) (*App, error) {
 
 	// ---- HTTP 初始化 ----
 	if options.http > 0 {
-		app.GinEngine = sharkhttp.New(app.Context, app.Env, app.Logger, options.http)
-		app.Ws = sharkws.NewSharkWS(app.GinEngine)
+		app.HttpServer = sharkhttp.NewServer(app.Context, app.Env, app.Logger, options.http)
+		app.GinEngine = app.HttpServer.Engine
+		app.Ws = sharkws.NewServer(app.GinEngine)
 		app.Logger.Info("开启http服务", zap.Int("port", options.http))
 		if options.env == "dev" {
 			app.Logger.Debug("swagger url: http://127.0.0.1" + ":" + fmt.Sprint(options.http) + "/swagger/index.html")
@@ -385,27 +399,26 @@ func New(options *Options) (*App, error) {
 	}
 
 	if options.pprof > 0 {
-		go app.pprof(options.pprof)
+		app.pprof(options.pprof)
 	}
 	if options.health > 0 {
-		go app.health_service(options.health)
+		app.health_service(options.health)
 	}
 
 	return app, nil
 }
 
-// pprof 在指定端口启动 pprof 服务，失败时仅记录日志。
+// pprof 创建 pprof 服务并异步监听 port，监听失败时仅记录日志。服务句柄保存在 App 中，Close 时关闭。
 func (a *App) pprof(port int) {
 	a.Logger.Info("开启pprof服务", zap.Int("port", port))
 	a.pprofServe = http.NewServeMux()
 	a.pprofServe.HandleFunc("/debug/pprof/", pprof.Index)
-	err := http.ListenAndServe(fmt.Sprintf(":%v", port), a.pprofServe)
-	if err != nil {
-		a.Logger.Error("pprof服务启动失败", zap.Int("port", port), zap.Error(err))
-	}
+	a.pprofServer = &http.Server{Addr: fmt.Sprintf(":%v", port), Handler: a.pprofServe}
+	go a.listen(a.pprofServer, "pprof服务启动失败", port)
 }
 
-// health_service 在指定端口提供 /health 存活探测，只表示进程存活，不检查中间件状态。
+// health_service 创建 /health 存活探测服务并异步监听 port，只表示进程存活，不检查中间件状态。
+// 服务句柄保存在 App 中，Close 时关闭。
 func (a *App) health_service(port int) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(writer http.ResponseWriter, request *http.Request) {
@@ -414,16 +427,24 @@ func (a *App) health_service(port int) {
 		writer.Write([]byte(`{"status": "ok"}`))
 	})
 	a.Logger.Info("开启存活探测服务", zap.Int("port", port))
-	err := http.ListenAndServe(fmt.Sprintf(":%v", port), mux)
-	if err != nil {
-		a.Logger.Error("存活探测服务启动失败", zap.Int("port", port), zap.Error(err))
+	a.healthServer = &http.Server{Addr: fmt.Sprintf(":%v", port), Handler: mux}
+	go a.listen(a.healthServer, "存活探测服务启动失败", port)
+}
+
+// listen 阻塞监听 srv，被 Close 关闭时视为正常，其他错误只记录日志。
+func (a *App) listen(srv *http.Server, failMsg string, port int) {
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		a.Logger.Error(failMsg, zap.Int("port", port), zap.Error(err))
 	}
 }
 
-// AppComponent 可由 Hunt 启动的应用组件。
+// AppComponent 可由 Hunt 启动和停止的应用组件。
 type AppComponent interface {
 	// Start 启动组件，应为非阻塞调用。
 	Start()
+	// Stop 停止组件并等待其后台工作结束，应在有限时间内返回，panic 会被恢复并记录日志。
+	// 调用时 HTTP、gRPC、WebSocket 入口已停止，但 Context 尚未取消，中间件客户端仍可使用。
+	Stop()
 }
 
 // banner 输出服务启动信息。
@@ -433,8 +454,16 @@ func (a *App) banner() {
 	a.Logger.Info("****************server start****************")
 }
 
-// Hunt 启动组件和 gRPC 服务，阻塞直到收到 SIGTERM 或 SIGINT，然后依次：
-// 取消 Context、等待已登记的 goroutine、关闭 ClickHouse 与日志。
+// Hunt 启动组件和 gRPC 服务，阻塞直到收到 SIGTERM 或 SIGINT，然后按依赖顺序关闭 App 持有的全部组件：
+//  1. 停止入口：HTTP 优雅关闭（最长 10 秒）、gRPC 优雅停止、关闭全部 WebSocket 连接、关闭 pprof 与健康检查；
+//  2. 按传入的相反顺序调用各组件的 Stop；
+//  3. 取消 Context，等待 500ms 和已登记的 goroutine（Wg）；
+//  4. 停止后台任务：定时器、协程池、RabbitMQ（先把发布队列发完）、gRPC 客户端连接；
+//  5. 关闭数据类客户端：Elasticsearch、MongoDB、etcd、ClickHouse、RisingWave、MySQL、Redis；
+//  6. 关闭日志的 Kafka 推送，关闭 Kafka 客户端，最后释放协程池。
+//
+// MinIO 客户端没有需要关闭的资源。关闭失败只记录日志，不中断后续步骤。
+// New 失败返回 error 时没有可用的 App，已创建的连接不会被自动关闭。
 func (a *App) Hunt(components ...AppComponent) {
 	for _, c := range components {
 		c.Start()
@@ -448,17 +477,98 @@ func (a *App) Hunt(components ...AppComponent) {
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	<-sig
 
+	a.Logger.Info("****************server stopping****************")
+	// logErr 在 err 不为 nil 时记录关闭 name 失败的日志。
+	logErr := func(name string, err error) {
+		if err != nil {
+			a.Logger.Error("关闭"+name+"失败", zap.Error(err))
+		}
+	}
+
+	// 先停入口，不再接收新的请求和连接。
+	if a.HttpServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		logErr("http", a.HttpServer.Shutdown(ctx))
+		cancel()
+	}
+	if a.Grpc != nil {
+		a.Grpc.Stop()
+	}
+	if a.Ws != nil {
+		a.Ws.CloseAll()
+	}
+	if a.healthServer != nil {
+		logErr("health", a.healthServer.Close())
+	}
+	if a.pprofServer != nil {
+		logErr("pprof", a.pprofServer.Close())
+	}
+
+	// 入口已停，按相反顺序停业务组件，panic 不影响后续关闭。
+	for i := len(components) - 1; i >= 0; i-- {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					a.Logger.Error("组件 Stop panic", zap.Any("panic", r), zap.String("stack", string(debug.Stack())))
+				}
+			}()
+			components[i].Stop()
+		}()
+	}
+
 	a.cancelFunc()
 	// 留出 500ms 让依赖 Context 的组件开始退出
 	time.Sleep(time.Millisecond * 500)
 	a.Wg.Wait()
-	if a.ClickHouse != nil {
-		if err := a.ClickHouse.Close(); err != nil {
-			a.Logger.Error("关闭clickhouse失败", zap.Error(err))
-		}
+
+	// 后台任务可能还在用下面的客户端，必须先于它们关闭。
+	if a.Timer != nil {
+		a.Timer.Close()
 	}
+	if a.Rabbitmq != nil {
+		a.Rabbitmq.Close()
+	}
+	if a.Grpc != nil {
+		a.Grpc.Close()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	defer cancel()
+	if a.Elastic != nil {
+		logErr("elastic", a.Elastic.Close(ctx))
+	}
+	if a.Mongodb != nil {
+		logErr("mongodb", a.Mongodb.Disconnect(ctx))
+	}
+	if a.Etcd != nil {
+		logErr("etcd", a.Etcd.Close())
+	}
+	if a.ClickHouse != nil {
+		logErr("clickhouse", a.ClickHouse.Close())
+	}
+	if a.RisingWave != nil {
+		logErr("risingwave", sharkdb.Close(a.RisingWave))
+	}
+	if a.Db != nil {
+		logErr("db", sharkdb.Close(a.Db))
+	}
+	if a.RedisCluster != nil {
+		logErr("redis cluster", a.RedisCluster.Close())
+	}
+	if a.RedisClient != nil {
+		logErr("redis client", a.RedisClient.Close())
+	}
+
 	a.Logger.Debug("****************server exit****************")
+	// 先摘掉日志的 Kafka Writer，再关闭 Kafka 客户端，之后日志只输出到控制台。
 	a.sharklog.Close()
+	if a.Kafka != nil {
+		logErr("kafka", a.Kafka.Close())
+	}
+	// 协程池最后释放：等待仍在运行的任务结束，最长 5 秒。
+	if a.AntPool != nil {
+		logErr("协程池", a.AntPool.ReleaseTimeout(closeTimeout))
+	}
 }
 
 // RunInPool 将 fn 提交到 AntPool 执行，panic 会被捕获并记录日志。

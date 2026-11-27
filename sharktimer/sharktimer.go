@@ -36,17 +36,25 @@ type Client struct {
 	redis           TimerRedis
 	logger          *zap.Logger
 	defaultCallback func(timerId string) // 到期任务无已注册回调时调用
+	cancel          context.CancelFunc   // 停止轮询
+	done            chan struct{}        // 轮询协程退出且协程池释放后关闭
 }
 
-// NewTimer 创建定时器并启动后台轮询；取消 ctx 可停止轮询并释放协程池。
+// poolReleaseTimeout 是关闭时等待已提交回调执行完的最长时间。
+const poolReleaseTimeout = 5 * time.Second
+
+// NewTimer 创建定时器并启动后台轮询；取消 ctx 或调用 Close 可停止轮询并释放协程池。
 // Redis key 为 {project}:timer:{name}-{id}；协程池（容量 10）创建失败时 panic。
 func NewTimer(ctx context.Context, project string, name string, id string, redis TimerRedis, logger *zap.Logger) *Client {
 	pool, err := ants.NewPool(10)
 	if err != nil {
 		panic(fmt.Sprintf("sharktimer ants.NewPool: %v", err))
 	}
+	ctx, cancel := context.WithCancel(ctx)
 	t := &Client{
 		ctx:           ctx,
+		cancel:        cancel,
+		done:          make(chan struct{}),
 		redis:         redis,
 		logger:        logger,
 		timerCallback: sync.Map{},
@@ -56,6 +64,27 @@ func NewTimer(ctx context.Context, project string, name string, id string, redis
 	}
 	go t.processTimer()
 	return t
+}
+
+// Close 停止轮询，并等待已提交的回调执行完（最长 5 秒）后释放协程池。可重复调用。
+// 尚未到期的任务仍保留在 Redis ZSet 中，回调只在内存里，下次启动后走 DefaultCallback。
+// 关闭后不要再调用 AddTimer、AddTimeWithId、RemoveTimer：它们依赖已取消的 ctx，Redis 写入会失败。
+func (t *Client) Close() {
+	t.cancel()
+	<-t.done
+}
+
+// sleep 用 timer 休眠 d，ctx 取消时提前返回 false。
+// timer 由 processTimer 创建并只在其协程中使用，避免每次休眠都分配新的 Timer。
+func (t *Client) sleep(timer *time.Timer, d time.Duration) bool {
+	timer.Reset(d)
+	select {
+	case <-t.ctx.Done():
+		timer.Stop()
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // logError 记录带 timerKey 的错误日志；logger 为 nil 时忽略。
@@ -69,9 +98,18 @@ func (t *Client) logError(msg string, err error) {
 // processTimer 每秒轮询 ZSet，每次最多取 100 个到期任务：
 // 先 ZRem 成功再在协程池中执行回调，避免重复触发；回调 panic 会被恢复并记录日志。
 func (t *Client) processTimer() {
+	// 退出前等已提交的回调跑完（有时限），再通知 Close。
+	defer func() {
+		if err := t.pool.ReleaseTimeout(poolReleaseTimeout); err != nil {
+			t.logError("sharktimer release pool timeout", err)
+		}
+		close(t.done)
+	}()
 	if t.redis == nil {
 		return
 	}
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
 	safeCallback := func(cb func()) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -85,7 +123,6 @@ func (t *Client) processTimer() {
 	for {
 		select {
 		case <-t.ctx.Done():
-			t.pool.Release()
 			return
 		default:
 			cmd := t.redis.ZRangeByScoreWithScores(t.ctx, t.timerKey, &redis.ZRangeBy{
@@ -97,15 +134,18 @@ func (t *Client) processTimer() {
 			result, err := cmd.Result()
 			if err != nil {
 				if t.ctx.Err() != nil {
-					t.pool.Release()
 					return
 				}
 				t.logError("sharktimer ZRange failed", err)
-				time.Sleep(time.Second)
+				if !t.sleep(timer, time.Second) {
+					return
+				}
 				continue
 			}
 			if len(result) == 0 {
-				time.Sleep(time.Second)
+				if !t.sleep(timer, time.Second) {
+					return
+				}
 				continue
 			}
 			members := make([]any, 0, len(result))
@@ -114,12 +154,13 @@ func (t *Client) processTimer() {
 			}
 			for {
 				if t.ctx.Err() != nil {
-					t.pool.Release()
 					return
 				}
 				if err := t.redis.ZRem(t.ctx, t.timerKey, members...).Err(); err != nil {
 					t.logError("sharktimer ZRem failed, retry", err)
-					time.Sleep(time.Second)
+					if !t.sleep(timer, time.Second) {
+						return
+					}
 					continue
 				}
 				break

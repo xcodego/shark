@@ -168,7 +168,8 @@ func (s *Client) CloseWriter(topic string) error {
 	return nil
 }
 
-// Close 关闭所有 Writer 并清空缓存，返回遇到的第一个错误。
+// Close 关闭所有 Writer（异步 Writer 会先刷出缓冲）并清空缓存，同时释放内部协程池，返回遇到的第一个错误。
+// 重复调用是安全的。BatchConsumer 由创建时传入的 ctx 控制退出，不在这里停止。
 func (s *Client) Close() error {
 	s.lock.Lock()
 	writers := s.writers
@@ -179,6 +180,9 @@ func (s *Client) Close() error {
 		if err := writer.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	if s.antpool != nil {
+		s.antpool.Release()
 	}
 	return firstErr
 }

@@ -7,6 +7,7 @@ package sharkgrpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"golang.org/x/sync/singleflight"
@@ -36,11 +37,27 @@ type RpcRedis interface {
 	Set(ctx context.Context, key string, value any, expiration time.Duration) *redis.StatusCmd
 }
 
+// stopTimeout 是 Stop 等待在途请求处理完的最长时间，超时后强制停止。
+const stopTimeout = 10 * time.Second
+
 // connection 保存 gRPC 客户端连接及其地址解析器。
 type connection struct {
-	conn     *grpc.ClientConn
-	resolver *manual.Resolver
-	addrs    atomic.Value // 当前已生效的有序地址列表([]string)，用于判断地址是否变化
+	conn      *grpc.ClientConn
+	resolver  *manual.Resolver
+	addrs     atomic.Value  // 当前已生效的有序地址列表([]string)，用于判断地址是否变化
+	owner     *Server       // 创建该连接的 Server，Close 只关闭自己创建的连接
+	done      chan struct{} // 连接关闭时关闭，通知 updateResolver 退出
+	closeOnce sync.Once
+}
+
+// close 关闭连接并通知地址刷新协程退出，可重复调用。
+func (c *connection) close() {
+	c.closeOnce.Do(func() {
+		close(c.done)
+		if c.conn != nil {
+			c.conn.Close()
+		}
+	})
 }
 
 // Server 管理 gRPC 服务端及客户端连接。
@@ -53,6 +70,7 @@ type Server struct {
 	port    int
 	sg      singleflight.Group
 	project string
+	closed  atomic.Bool // Close 之后为 true，GetRpcConnection 不再创建连接
 }
 
 // New 创建 gRPC 服务管理器；port 大于 0 时才创建服务端，否则仅可作为客户端使用。
@@ -84,22 +102,68 @@ func (s *Server) Run() {
 			return
 		}
 		err = s.Server.Serve(listener)
-		if err != nil && s.logger != nil {
+		// Stop 先于 Serve 执行时会返回 ErrServerStopped，属于正常关闭。
+		if err != nil && !errors.Is(err, grpc.ErrServerStopped) && s.logger != nil {
 			s.logger.Error("failed to serve", zap.Error(err))
 		}
 	}()
 }
 
+// Stop 优雅停止 gRPC 服务端：不再接受新请求，等待在途请求处理完，最长 10 秒，超时后强制停止。
+// port 不大于 0 时没有服务端，什么也不做。可重复调用。客户端连接不受影响，需要时调用 Close。
+func (s *Server) Stop() {
+	if s.Server == nil {
+		return
+	}
+	stopped := make(chan struct{})
+	go func() {
+		s.Server.GracefulStop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(stopTimeout):
+		if s.logger != nil {
+			s.logger.Warn("grpc graceful stop timeout, force stop")
+		}
+		s.Server.Stop()
+		<-stopped
+	}
+}
+
+// Close 先 Stop 服务端，再关闭本 Server 通过 GetRpcConnection 创建的全部客户端连接，
+// 并停止对应的地址刷新协程。可重复调用；关闭后 GetRpcConnection 返回错误。
+func (s *Server) Close() {
+	s.closed.Store(true)
+	s.Stop()
+	connections.Range(func(key, value any) bool {
+		c := value.(*connection)
+		if c.owner == s {
+			connections.Delete(key)
+			c.close()
+		}
+		return true
+	})
+}
+
 // updateResolver 每 5 秒从 Redis 拉取地址列表，有变化时更新解析器；
-// 随连接创建而启动，常驻运行（进程常驻，不设退出）。
+// 随连接创建而启动，ctx 取消或连接被关闭时退出。
 func (s *Server) updateResolver(name string) {
 	v, ok := connections.Load(name)
 	if !ok {
 		return
 	}
 	c := v.(*connection)
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
 	for {
-		time.Sleep(5 * time.Second)
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-c.done:
+			return
+		case <-ticker.C:
+		}
 		addr, err := s.redis.Get(s.ctx, s.redisGrpcHost(name)).Result()
 		if err != nil {
 			s.logger.Error("failed to get grpc address from redis", zap.String("name", name), zap.Error(err))
@@ -159,6 +223,9 @@ func (s *Server) GetRpcConnection(name string) (*grpc.ClientConn, error) {
 	if s.redis == nil {
 		return nil, fmt.Errorf("GetRpcConnection redis未初始化")
 	}
+	if s.closed.Load() {
+		return nil, fmt.Errorf("GetRpcConnection server已关闭")
+	}
 	conn, err, _ := s.sg.Do("grpc-conn-"+name, func() (any, error) {
 		v, ok := connections.Load(name)
 		if ok {
@@ -185,6 +252,8 @@ func (s *Server) GetRpcConnection(name string) (*grpc.ClientConn, error) {
 			sort.Strings(addrs)
 			c := &connection{
 				resolver: manual.NewBuilderWithScheme("custom"),
+				owner:    s,
+				done:     make(chan struct{}),
 			}
 			c.addrs.Store(append([]string{}, addrs...))
 			var resolverAddrs []resolver.Address = make([]resolver.Address, 0, len(addrs))
