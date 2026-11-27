@@ -19,17 +19,21 @@ import (
 	"go.uber.org/zap/exp/zapslog"
 )
 
+// BinlogConfig 配置 MySQL Binlog 监听器。
 type BinlogConfig struct {
-	Addr           string
-	User           string
-	Password       string
-	Logger         *zap.Logger
-	Redis          *redis.ClusterClient
-	PosKey         string
-	Database       string
-	EnableCanalLog bool
+	Addr           string               // MySQL 地址，格式 "host:port"
+	User           string               // 用户名
+	Password       string               // 密码
+	Logger         *zap.Logger          // 日志记录器
+	Redis          *redis.ClusterClient // 位点存储
+	PosKey         string               // 保存 binlog 位点的 Redis 键
+	Database       string               // 只监听该库的表变更
+	EnableCanalLog bool                 // 是否输出 Canal 内部日志，默认丢弃
 }
 
+// BinlogListener 监听 MySQL Binlog 并分发数据变更事件。
+// 要求 binlog_row_image=FULL；位点持久化在 Redis，重启后从上次位点继续。
+// 回调在 canal 事件协程中同步执行，应尽快返回。
 type BinlogListener struct {
 	config   *BinlogConfig
 	onInsert func(table string, data map[string]any)
@@ -39,14 +43,16 @@ type BinlogListener struct {
 	cancel   context.CancelFunc
 }
 
+// NewBinlogListener 创建 Binlog 监听器，需通过 OnInsert/OnUpdate/OnDelete 注册回调后调用 Start。
 func NewBinlogListener(config *BinlogConfig) *BinlogListener {
 	return &BinlogListener{
 		config: config,
 	}
 }
 
-// Start 从 Redis 中保存的位点开始监听，直到 Stop 被调用或发生错误。
-// 首次启动时先保存主库当前位点，再开始监听；不会导出已有数据。
+// Start 从 Redis 中保存的位点开始监听，阻塞直到 Stop 被调用或发生错误。
+// 首次启动（Redis 无位点）时先保存主库当前位点再监听，不会导出已有数据。
+// 配置缺失、已在运行或位点非法时返回错误；同一监听器同时只能运行一个 Start。
 func (l *BinlogListener) Start() error {
 	if l.config == nil || l.config.Logger == nil || l.config.Redis == nil ||
 		strings.TrimSpace(l.config.Addr) == "" || strings.TrimSpace(l.config.User) == "" ||
@@ -135,10 +141,12 @@ func (l *BinlogListener) Start() error {
 	return ctx.Err()
 }
 
+// canalLogHandler 包装 slog.Handler，用于将 canal 日志转发到 zap。
 type canalLogHandler struct {
 	slog.Handler
 }
 
+// canalConfig 构建 canal 配置：不使用 mysqldump，只订阅配置库下的表。
 func (l *BinlogListener) canalConfig() canal.Config {
 	cfg := canal.NewDefaultConfig()
 	cfg.Addr = l.config.Addr
@@ -163,7 +171,7 @@ func (l *BinlogListener) Stop() {
 	}
 }
 
-// OnInsert 注册插入事件回调。
+// OnInsert 注册插入事件回调，data 为新行（列名到值）。
 func (l *BinlogListener) OnInsert(fn func(table string, data map[string]any)) *BinlogListener {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -179,7 +187,7 @@ func (l *BinlogListener) OnUpdate(fn func(table string, data map[string]any)) *B
 	return l
 }
 
-// OnDelete 注册删除事件回调。
+// OnDelete 注册删除事件回调，data 为被删除的行。
 func (l *BinlogListener) OnDelete(fn func(table string, data map[string]any)) *BinlogListener {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -187,12 +195,15 @@ func (l *BinlogListener) OnDelete(fn func(table string, data map[string]any)) *B
 	return l
 }
 
+// eventHandler 实现 canal.EventHandler：分发行变更并持久化位点。
 type eventHandler struct {
 	canal.DummyEventHandler
 	listener *BinlogListener
 	ctx      context.Context
 }
 
+// OnRow 校验行事件后分发给回调；其他库的事件直接忽略。
+// 更新事件的 Rows 为 (旧行, 新行) 成对出现，只回调新行。
 func (h *eventHandler) OnRow(event *canal.RowsEvent) error {
 	if event == nil || event.Table == nil {
 		return errors.New("binlog: row event has no table metadata")
@@ -243,6 +254,7 @@ func (h *eventHandler) OnRow(event *canal.RowsEvent) error {
 	return nil
 }
 
+// OnPosSynced 在位点推进时写入 Redis。
 func (h *eventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Position, _ mysql.GTIDSet, _ bool) error {
 	if header == nil {
 		return nil
@@ -250,6 +262,7 @@ func (h *eventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Po
 	return h.savePosition(pos)
 }
 
+// savePosition 将位点序列化为 JSON 保存到 Redis（不过期）。
 func (h *eventHandler) savePosition(pos mysql.Position) error {
 	if pos.Name == "" || pos.Pos < 4 {
 		return errors.New("binlog: invalid position to save")

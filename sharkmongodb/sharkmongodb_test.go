@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// TestDispatchUpdate 验证 update 与 replace 事件都会以完整文档调用 OnUpdate 回调。
 func TestDispatchUpdate(t *testing.T) {
 	for _, operation := range []string{"update", "replace"} {
 		t.Run(operation, func(t *testing.T) {
@@ -31,6 +32,7 @@ func TestDispatchUpdate(t *testing.T) {
 	}
 }
 
+// TestDispatchUpdateWithoutFullDocument 验证缺少完整文档的 update 事件返回错误且不调用回调。
 func TestDispatchUpdateWithoutFullDocument(t *testing.T) {
 	listener := NewBinlogListener(nil)
 	called := false

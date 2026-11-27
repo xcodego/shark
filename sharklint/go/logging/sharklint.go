@@ -15,17 +15,21 @@ import (
 	"strings"
 )
 
+// forceIgnorePattern 匹配 "force ignore sharklint: logging" 豁免标记。
 var forceIgnorePattern = regexp.MustCompile(`force[ \t]+ignore[ \t]+sharklint[ \t]*:[ \t]*logging\b`)
 
+// printFunctions 是 fmt 包中被视为直接打印日志的函数。
 var printFunctions = map[string]struct{}{
 	"Print": {}, "Println": {}, "Printf": {},
 	"Fprint": {}, "Fprintln": {}, "Fprintf": {},
 }
 
+// zapGlobalFunctions 是 zap 包中访问或修改全局 Logger 的函数。
 var zapGlobalFunctions = map[string]struct{}{
 	"L": {}, "S": {}, "ReplaceGlobals": {}, "RedirectStdLog": {},
 }
 
+// zapConstructors 是 zap 包中直接创建 Logger 的构造函数。
 var zapConstructors = map[string]struct{}{
 	"New": {}, "NewDevelopment": {}, "NewExample": {},
 	"NewNop": {}, "NewProduction": {},
@@ -33,16 +37,21 @@ var zapConstructors = map[string]struct{}{
 
 // Violation 表示一处绕过注入式 zap.Logger 的日志调用。
 type Violation struct {
+	// Position 是违规调用或导入的位置。
 	Position token.Position
-	Message  string
+	// Message 描述具体违规原因。
+	Message string
 }
 
+// Error 返回带位置信息的违规描述。
 func (v Violation) Error() string {
 	return fmt.Sprintf("%s: %s", v.Position, v.Message)
 }
 
 // Lint 递归检查 dir 中所有非测试 .go 文件，不跟随符号链接。
-// 检查禁止直接打印、使用标准库 log、zap 全局 Logger，以及在业务包中创建 Logger。
+// 检查禁止直接打印（fmt.Print*、内置 print/println）、导入标准库 log 或 log/slog、使用 zap 全局 Logger，
+// 以及在业务代码中创建 Logger（仅 sharklog 包的 New 函数可以创建）。
+// 可在违规行的上一行用 force ignore 注释豁免。
 func Lint(dir string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
@@ -79,6 +88,7 @@ func Lint(dir string) error {
 	return errors.Join(errs...)
 }
 
+// checkFile 检查单个文件中的违规导入和调用, 结果追加到 errs。
 func checkFile(path string, fset *token.FileSet, file *ast.File, errs *[]error) {
 	checkForbiddenLogImports(fset, file, errs)
 	fmtNames, zapNames := importedNames(file)
@@ -127,6 +137,7 @@ func checkFile(path string, fset *token.FileSet, file *ast.File, errs *[]error) 
 	})
 }
 
+// checkForbiddenLogImports 报告对 log 与 log/slog 的导入; sharkdb 的 binloglistener.go 因 go-mysql 需要 slog 适配而例外。
 func checkForbiddenLogImports(fset *token.FileSet, file *ast.File, errs *[]error) {
 	checkPath := fset.Position(file.Pos()).Filename
 	for _, spec := range file.Imports {
@@ -147,6 +158,7 @@ func checkForbiddenLogImports(fset *token.FileSet, file *ast.File, errs *[]error
 	}
 }
 
+// isSlogAdapterFile 判断 file 是否为允许导入 log/slog 的 sharkdb/binloglistener.go。
 func isSlogAdapterFile(path string, file *ast.File) bool {
 	if file.Name.Name != "sharkdb" {
 		return false
@@ -156,6 +168,7 @@ func isSlogAdapterFile(path string, file *ast.File) bool {
 		strings.HasSuffix(path, "/sharkdb/binloglistener.go")
 }
 
+// addViolation 在 call 所在行未被豁免时追加一条违规。
 func addViolation(fset *token.FileSet, file *ast.File, call *ast.CallExpr, message string, errs *[]error) {
 	position := fset.PositionFor(call.Pos(), false)
 	if !hasForceIgnoreComment(file, fset, position.Line) {
@@ -163,13 +176,14 @@ func addViolation(fset *token.FileSet, file *ast.File, call *ast.CallExpr, messa
 	}
 }
 
+// isSharklintCommand 判断 path 是否为 sharklint 命令入口; 其 fmt 输出是面向用户的用法和诊断信息, 不属于日志。
 func isSharklintCommand(path string) bool {
-	// This command's fmt calls produce user-facing usage and diagnostics, not logs.
 	path = filepath.ToSlash(filepath.Clean(path))
 	return path == "sharklint/cmd/sharklint/main.go" ||
 		strings.HasSuffix(path, "/sharklint/cmd/sharklint/main.go")
 }
 
+// isLoggerFactoryCall 判断 position 是否位于 sharklog 包的 New 函数体内, 只有这里允许创建 Logger。
 func isLoggerFactoryCall(path string, file *ast.File, position token.Pos) bool {
 	if file.Name.Name != "sharklog" || filepath.Base(filepath.Dir(path)) != "sharklog" {
 		return false
@@ -184,11 +198,13 @@ func isLoggerFactoryCall(path string, file *ast.File, position token.Pos) bool {
 	return false
 }
 
+// callName 是被调用函数的名称; 非限定调用时 packageName 为空。
 type callName struct {
 	packageName string
 	function    string
 }
 
+// calledName 解析形如 pkg.Func 或 Func 的调用目标; 其他形式（如方法链）返回 false。
 func calledName(expression ast.Expr) (callName, bool) {
 	switch function := expression.(type) {
 	case *ast.SelectorExpr:
@@ -201,6 +217,7 @@ func calledName(expression ast.Expr) (callName, bool) {
 	return callName{}, false
 }
 
+// importedNames 返回文件中 fmt 与 go.uber.org/zap 的本地引用名（含别名, "." 表示点导入, 忽略 _ 导入）。
 func importedNames(file *ast.File) (fmtNames, zapNames map[string]bool) {
 	fmtNames = make(map[string]bool)
 	zapNames = make(map[string]bool)
@@ -236,25 +253,30 @@ func importedNames(file *ast.File) (fmtNames, zapNames map[string]bool) {
 	return fmtNames, zapNames
 }
 
+// isPrintFunction 判断 name 是否为 fmt 的打印函数。
 func isPrintFunction(name string) bool {
 	_, ok := printFunctions[name]
 	return ok
 }
 
+// isBuiltinPrintFunction 判断 name 是否为内置 print 或 println。
 func isBuiltinPrintFunction(name string) bool {
 	return name == "print" || name == "println"
 }
 
+// isZapGlobalFunction 判断 name 是否为 zap 的全局 Logger 相关函数。
 func isZapGlobalFunction(name string) bool {
 	_, ok := zapGlobalFunctions[name]
 	return ok
 }
 
+// isZapConstructor 判断 name 是否为 zap 的 Logger 构造函数。
 func isZapConstructor(name string) bool {
 	_, ok := zapConstructors[name]
 	return ok
 }
 
+// isZapConfigBuild 判断 call 是否为通过 zap.Config（配置构造函数或字面量）调用 Build 创建 Logger。
 func isZapConfigBuild(call *ast.CallExpr, zapNames map[string]bool) bool {
 	method, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || method.Sel.Name != "Build" {
@@ -283,10 +305,12 @@ func isZapConfigBuild(call *ast.CallExpr, zapNames map[string]bool) bool {
 	return false
 }
 
+// isZapConfigConstructor 判断 name 是否为返回 zap.Config 的构造函数。
 func isZapConfigConstructor(name string) bool {
 	return name == "NewDevelopmentConfig" || name == "NewProductionConfig"
 }
 
+// hasForceIgnoreComment 判断 callLine 的上一行是否以豁免注释结尾。
 func hasForceIgnoreComment(file *ast.File, fset *token.FileSet, callLine int) bool {
 	for _, group := range file.Comments {
 		if fset.PositionFor(group.End(), false).Line == callLine-1 &&

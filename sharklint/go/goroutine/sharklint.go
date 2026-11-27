@@ -14,19 +14,23 @@ import (
 	"strings"
 )
 
+// forceIgnorePattern 匹配 "force ignore sharklint: goroutine" 豁免标记。
 var forceIgnorePattern = regexp.MustCompile(`force[ \t]+ignore[ \t]+sharklint[ \t]*:[ \t]*goroutine`)
 
 // Violation 表示一处直接启动协程的违规位置。
 type Violation struct {
+	// Position 是 go 关键字所在位置。
 	Position token.Position
 }
 
+// Error 返回带位置信息的违规描述。
 func (v Violation) Error() string {
 	return fmt.Sprintf("%s: 禁止直接使用 go 启动协程", v.Position)
 }
 
 // Lint 递归检查 dir 中所有非测试 .go 文件，包括被构建标签排除的文件。
 // 检查不会跟随符号链接，返回所有发现的违规及文件系统或语法错误。
+// 每条 go 语句均视为违规, 可在上一行用 force ignore 注释豁免。
 func Lint(dir string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
@@ -70,6 +74,7 @@ func Lint(dir string) error {
 	return errors.Join(errs...)
 }
 
+// hasForceIgnoreComment 判断 go 语句所在行的上一行是否以豁免注释结尾。
 func hasForceIgnoreComment(file *ast.File, fset *token.FileSet, statementLine int) bool {
 	for _, group := range file.Comments {
 		if fset.PositionFor(group.End(), false).Line == statementLine-1 &&

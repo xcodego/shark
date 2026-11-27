@@ -9,26 +9,39 @@ import (
 	"strings"
 )
 
+// keyReason 是直接使用字符串字面量或拼接字符串作为 key 时的违规说明。
 const keyReason = "禁止直接使用字符串或构造字符串作为 Redis key"
 
+// rawArgument 描述一个命令参数的静态分析结果。
 type rawArgument struct {
-	text  string
+	// text 是可确定的常量文本（字符串或整数），未知时为空。
+	text string
+	// built 表示该值由字符串字面量、拼接或 fmt/strings/strconv 等构造而来。
 	built bool
 }
 
+// rawSequence 描述切片形式的参数列表（如 []any 或 args...）的静态分析结果。
 type rawSequence struct {
+	// values 记录已知下标上的元素。
 	values map[int]rawArgument
+	// length 是已知长度，-1 表示长度未知。
 	length int
+	// prefix 是长度未知时，下标仍然精确可信的前缀长度。
 	prefix int
-	cap    int
+	// cap 是已知容量，-1 表示未知；用于判断 append 后是否仍共享底层数组。
+	cap int
+	// origin 标识底层数组的创建位置，用于把别名切片的写入同步到同一底层数组。
 	origin token.Pos
-	tail   rawArgument
+	// tail 汇总长度未知或下标未知的元素，只要有一个 built 就视为 built。
+	tail rawArgument
 }
 
+// keyMap 描述 map 参数的分析结果，built 表示任一 map key 为构造出的字符串。
 type keyMap struct {
 	built bool
 }
 
+// keyState 是流分析中某一程序点上各变量的状态，按 types.Object 记录。
 type keyState struct {
 	built     map[types.Object]bool
 	strings   map[types.Object]string
@@ -36,6 +49,9 @@ type keyState struct {
 	maps      map[types.Object]*keyMap
 }
 
+// builtString 判断 expr 是否是直接字符串或构造出来的字符串（字面量、+ 拼接、
+// fmt.Sprint*、strings/strconv 返回值、string 转换，及含此类 Key/Keys/Stream 字段的结构体）。
+// 常量标识符不算，这样引用常量定义的 key 不会被报告。
 func builtString(expr ast.Expr, info *types.Info, built map[types.Object]bool) bool {
 	switch e := ast.Unparen(expr).(type) {
 	case *ast.BasicLit:
@@ -117,6 +133,8 @@ func builtString(expr ast.Expr, info *types.Info, built map[types.Object]bool) b
 	return false
 }
 
+// keyCall 判断 call 是否把 built 字符串作为 key 参数传给受支持的 Redis 客户端，
+// 依据方法形参名（key/keys/dest 等）确定哪些参数是 key；原始命令入口则交给 rawKeys。
 func keyCall(call *ast.CallExpr, info *types.Info, state *keyState) bool {
 	built := state.built
 	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
@@ -212,6 +230,7 @@ func keyCall(call *ast.CallExpr, info *types.Info, state *keyState) bool {
 	return false
 }
 
+// alternatingKeys 检查 MSET 这类 key、value 交替排列的参数，只看 key 位置（偶数下标）。
 func alternatingKeys(call *ast.CallExpr, info *types.Info, state *keyState, start int) bool {
 	if start == len(call.Args)-1 {
 		if seq, ok := state.sequence(call.Args[start], info); ok {
@@ -234,6 +253,8 @@ func alternatingKeys(call *ast.CallExpr, info *types.Info, state *keyState, star
 	return false
 }
 
+// argument 分析 expr 作为命令参数时的 built 状态与常量文本，
+// 会展开 args[i] 下标访问和切片元素。
 func (s *keyState) argument(expr ast.Expr, info *types.Info) rawArgument {
 	arg := rawArgument{built: builtString(expr, info, s.built)}
 	if seq, ok := s.sequence(expr, info); ok {
@@ -272,6 +293,8 @@ func (s *keyState) argument(expr ast.Expr, info *types.Info) rawArgument {
 	return arg
 }
 
+// sequence 把 expr 解析为切片序列：支持变量、make、append 及切片字面量；
+// 无法识别时返回 false。
 func (s *keyState) sequence(expr ast.Expr, info *types.Info) (*rawSequence, bool) {
 	if id, ok := ast.Unparen(expr).(*ast.Ident); ok {
 		args, found := s.sequences[info.ObjectOf(id)]
@@ -404,6 +427,7 @@ func (s *keyState) sequence(expr ast.Expr, info *types.Info) (*rawSequence, bool
 	return sequence, true
 }
 
+// mapValue 把 expr 解析为 map 状态：支持变量与 map 字面量；无法识别时返回 nil。
 func (s *keyState) mapValue(expr ast.Expr, info *types.Info) *keyMap {
 	if id, ok := ast.Unparen(expr).(*ast.Ident); ok {
 		obj := info.ObjectOf(id)
@@ -435,6 +459,7 @@ func (s *keyState) mapValue(expr ast.Expr, info *types.Info) *keyMap {
 	return m
 }
 
+// assign 在重新赋值时先清除 obj 原有状态，再写入新的文本、序列和 map 状态。
 func (s *keyState) assign(obj types.Object, arg rawArgument, sequence *rawSequence, m *keyMap) {
 	if obj == nil {
 		return
@@ -453,6 +478,8 @@ func (s *keyState) assign(obj types.Object, arg rawArgument, sequence *rawSequen
 	}
 }
 
+// rawKeys 检查原始命令调用（Do、Send 等）：先从 commandIndex 处取出常量命令名，
+// 再按该命令的 key 位置规则判断对应参数是否为 built 字符串。
 func rawKeys(call *ast.CallExpr, info *types.Info, state *keyState, commandIndex int) bool {
 	args := make([]rawArgument, 0, len(call.Args))
 	var expanded *rawSequence
@@ -546,7 +573,7 @@ func rawKeys(call *ast.CallExpr, info *types.Info, state *keyState, commandIndex
 	case "DEL", "UNLINK", "EXISTS", "MGET", "TOUCH", "WATCH", "RENAME", "RENAMENX",
 		"RPOPLPUSH", "LMOVE", "SMOVE", "COPY", "SDIFF", "SINTER", "SUNION",
 		"SDIFFSTORE", "SINTERSTORE", "SUNIONSTORE", "PFCOUNT", "PFMERGE":
-		// Commands with additional non-key arguments only use their first two keys.
+		// 这些命令除 key 外还带有其他参数，仅前两个参数是 key。
 		if command == "RENAME" || command == "RENAMENX" || command == "RPOPLPUSH" ||
 			command == "LMOVE" || command == "SMOVE" || command == "COPY" {
 			end = start + 2

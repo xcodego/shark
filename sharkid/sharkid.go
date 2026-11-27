@@ -1,3 +1,5 @@
+// Package sharkid 提供基于 Redis 的用户 ID 和唯一 ID 预生成与获取功能。
+// 用户 ID 为固定位数的随机数，用 Redis 位图去重，并预先放入分片列表供快速领取。
 package sharkid
 
 import (
@@ -10,23 +12,27 @@ import (
 	"go.uber.org/zap"
 )
 
+// Config 是 ID 生成器的配置。RedisClient 与 RedisCluster 至少设置一个，优先使用 RedisClient。
 type Config struct {
-	Project      string
-	Logger       *zap.Logger
-	RedisClient  *redis.Client
-	RedisCluster *redis.ClusterClient
-	UserIdDigits int          // 用户 id 位数
-	UniqueIdFunc func() int64 // 生成用户 id 的函数
+	Project      string               // 项目名称，用作 Redis key 前缀
+	Logger       *zap.Logger          // 日志记录器，必填
+	RedisClient  *redis.Client        // Redis 客户端
+	RedisCluster *redis.ClusterClient // Redis 集群客户端
+	UserIdDigits int                  // 用户 ID 位数，取值 1~10，<= 0 时默认 8
+	UniqueIdFunc func() int64         // 唯一 ID 生成函数；为 nil 时不提供唯一 ID，返回值 <= 0 表示生成失败
 }
 
+// SharkId 管理用户 ID 和唯一 ID 的预生成队列。
 type SharkId struct {
 	config       *Config
-	ShardCount   int
-	PreloadCount int
+	ShardCount   int // Redis 分片数量，默认 10
+	PreloadCount int // 每个分片列表的预生成数量上限，默认 10000
 	userIds      chan int
 	uniqueIds    chan int64
 }
 
+// New 创建 ID 生成器，需调用 Run 启动预生成。
+// config 或 Logger 为空、位数超出范围、未配置 Redis 客户端时返回 nil。
 func New(config *Config) *SharkId {
 	if config == nil {
 		return nil
@@ -53,6 +59,9 @@ func New(config *Config) *SharkId {
 		uniqueIds:    make(chan int64, 100000),
 	}
 }
+
+// idRange 返回 UserIdDigits 位数字的取值范围 [min, max]，如 8 位为 10000000~99999999。
+// 位数非法或超出 int 范围时返回 0, 0。
 func (s *SharkId) idRange() (int, int) {
 	if s == nil || s.config == nil || s.config.UserIdDigits < 1 || s.config.UserIdDigits > 18 {
 		return 0, 0
@@ -68,14 +77,17 @@ func (s *SharkId) idRange() (int, int) {
 	return int(minID), int(maxID)
 }
 
+// bitmapKey 返回记录某分片 ID 是否已被占用的位图 key。
 func (s *SharkId) bitmapKey(userId int) string {
 	return fmt.Sprintf("%v:sharkid:bitmap:%d", s.config.Project, userId%s.ShardCount)
 }
 
+// userIdListKey 返回用户 ID 预生成列表的 key。
 func (s *SharkId) userIdListKey(userId int) string {
 	return fmt.Sprintf("%v:sharkid:list:%d", s.config.Project, userId%s.ShardCount)
 }
 
+// rpush 向列表尾部追加数据，失败时每秒重试直到成功。
 func (s *SharkId) rpush(key string, args ...any) {
 	for {
 		if s.config.RedisClient != nil {
@@ -95,6 +107,7 @@ func (s *SharkId) rpush(key string, args ...any) {
 	}
 }
 
+// llen 返回列表长度，失败时每秒重试直到成功。
 func (s *SharkId) llen(key string) int {
 	for {
 		if s.config.RedisClient != nil {
@@ -117,6 +130,7 @@ func (s *SharkId) llen(key string) int {
 	}
 }
 
+// lpop 从列表头部弹出一个整数，列表为空或出错时返回 error。
 func (s *SharkId) lpop(key string) (int, error) {
 	if s.config.RedisClient != nil {
 		return s.config.RedisClient.LPop(context.Background(), key).Int()
@@ -127,6 +141,7 @@ func (s *SharkId) lpop(key string) (int, error) {
 	return 0, fmt.Errorf("no Redis client available")
 }
 
+// bitget 读取位图指定偏移的位，失败时每秒重试直到成功。
 func (s *SharkId) bitget(key string, offset int) int {
 	for {
 		if s.config.RedisClient != nil {
@@ -149,6 +164,7 @@ func (s *SharkId) bitget(key string, offset int) int {
 	}
 }
 
+// bitset 设置位图指定偏移的位并返回旧值，失败时每秒重试直到成功。
 func (s *SharkId) bitset(key string, offset int, value int) int {
 	for {
 		if s.config.RedisClient != nil {
@@ -171,6 +187,7 @@ func (s *SharkId) bitset(key string, offset int, value int) int {
 	}
 }
 
+// getOffset 把用户 ID 映射为位图分片序号和分片内的位偏移。
 func (s *SharkId) getOffset(userId int) (int, int) {
 	minId, _ := s.idRange()
 	offset := userId - minId
@@ -179,6 +196,8 @@ func (s *SharkId) getOffset(userId int) (int, int) {
 	return shard, bitOffset
 }
 
+// GetUserId 从预生成列表中领取一个用户 ID，从随机分片开始依次尝试各分片。
+// 所有分片都没有可用 ID 时返回 0。
 func (s *SharkId) GetUserId() int {
 	idx := sharkutils.RandNum(0, s.ShardCount)
 	for i := 0; i < s.ShardCount; i++ {
@@ -198,7 +217,10 @@ func (s *SharkId) GetUserId() int {
 	return 0
 }
 
+// Run 启动预生成后台协程（不阻塞）：随机生成未占用的用户 ID，经位图去重后放入分片列表；
+// 配置了 UniqueIdFunc 时同样预生成唯一 ID。协程随进程常驻，没有停止机制。
 func (s *SharkId) Run() {
+	// 候选生成：随机取号并跳过位图中已占用的，放入内存队列（队列满时阻塞）。
 	go func() {
 		minId, maxId := s.idRange()
 		for {
@@ -211,6 +233,7 @@ func (s *SharkId) Run() {
 			s.userIds <- userId
 		}
 	}()
+	// 入列：列表未满时才标记位图并推入列表；已满则丢弃候选（未标记，之后仍可被选中），等待消耗。
 	go func() {
 		for {
 			userId := <-s.userIds
@@ -228,6 +251,7 @@ func (s *SharkId) Run() {
 		}
 	}()
 	if s.config.UniqueIdFunc != nil {
+		// 唯一 ID 预生成：UniqueIdFunc 返回 <= 0 视为暂不可用，稍后重试。
 		go func() {
 			for {
 				uniqueId := s.config.UniqueIdFunc()
@@ -253,10 +277,13 @@ func (s *SharkId) Run() {
 	}
 }
 
+// uniqueIdListKey 返回唯一 ID 预生成列表的 key。
 func (s *SharkId) uniqueIdListKey(uniqueId int64) string {
 	return fmt.Sprintf("%v:uniqueid:%v", s.config.Project, uniqueId%int64(s.ShardCount))
 }
 
+// GetUniqueId 获取一个唯一 ID，未配置 UniqueIdFunc 或获取失败时返回 0。
+// 优先直接调用 UniqueIdFunc；其失败（<= 0）时依次回退到内存预生成队列和 Redis 预生成列表。
 func (s *SharkId) GetUniqueId() int64 {
 	if s.config.UniqueIdFunc == nil {
 		return 0

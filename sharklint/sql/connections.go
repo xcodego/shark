@@ -7,16 +7,21 @@ import (
 	"strings"
 )
 
+// connectionTracker 在事务函数体内跟踪 gorm.DB 和 sql.Stmt 变量究竟绑定在事务上还是非事务连接上。
+// 流分析状态是一个字符串，每个被跟踪的变量占一个字节（取值为 connection* 位集合）。
 type connectionTracker struct {
+	// indices 记录变量在状态字符串中的下标。
 	indices map[types.Object]int
 }
 
+// 变量可能绑定的连接类型位标志；多条路径汇合时按位或合并。
 const (
 	connectionTx byte = 1 << iota
 	connectionNonTx
 	connectionUnknown
 )
 
+// newConnectionTracker 收集 body 中出现的 gorm.DB 与 sql.Stmt 变量（以及 tx）作为被跟踪对象。
 func newConnectionTracker(body *ast.BlockStmt, tx types.Object, info *types.Info) *connectionTracker {
 	tracker := &connectionTracker{indices: make(map[types.Object]int)}
 	add := func(obj types.Object) {
@@ -39,6 +44,7 @@ func newConnectionTracker(body *ast.BlockStmt, tx types.Object, info *types.Info
 	return tracker
 }
 
+// namedType 返回 t（可为指针）对应命名类型的包路径和类型名，不是命名类型时返回空串。
 func namedType(t types.Type) (string, string) {
 	if t == nil {
 		return "", ""
@@ -54,10 +60,12 @@ func namedType(t types.Type) (string, string) {
 	return named.Obj().Pkg().Path(), named.Obj().Name()
 }
 
+// empty 返回初始状态，所有变量均为未知连接。
 func (c *connectionTracker) empty() string {
 	return strings.Repeat("\x04", len(c.indices))
 }
 
+// join 合并两个分支上的状态，按位取并集。
 func (c *connectionTracker) join(a, b string) string {
 	joined := []byte(a)
 	for i := range joined {
@@ -66,6 +74,7 @@ func (c *connectionTracker) join(a, b string) string {
 	return string(joined)
 }
 
+// set 返回将 obj 的连接类型设为 value 后的新状态；未被跟踪的变量保持不变。
 func (c *connectionTracker) set(state string, obj types.Object, value byte) string {
 	index, ok := c.indices[obj]
 	if !ok {
@@ -76,6 +85,7 @@ func (c *connectionTracker) set(state string, obj types.Object, value byte) stri
 	return string(updated)
 }
 
+// get 返回 obj 在 state 中的连接类型，未被跟踪时为 connectionUnknown。
 func (c *connectionTracker) get(state string, obj types.Object) byte {
 	if index, ok := c.indices[obj]; ok {
 		return state[index]
@@ -83,11 +93,14 @@ func (c *connectionTracker) get(state string, obj types.Object) byte {
 	return connectionUnknown
 }
 
+// isTransaction 判断 obj 此刻是否确定绑定在事务上：*sql.Tx 类型，或状态为 connectionTx。
 func (c *connectionTracker) isTransaction(obj types.Object, state string) bool {
 	path, name := namedType(obj.Type())
 	return path == "database/sql" && name == "Tx" || c.get(state, obj) == connectionTx
 }
 
+// source 推断 expr 产生的连接类型：已跟踪变量沿用其状态，gorm Begin 与 Tx.Stmt/Prepare 为事务，
+// DB/Conn 上的 Prepare 为非事务，gorm 链式调用继承接收者，其余为未知。
 func (c *connectionTracker) source(expr ast.Expr, state string, info *types.Info) byte {
 	if expr == nil {
 		return connectionUnknown
@@ -125,6 +138,7 @@ func (c *connectionTracker) source(expr ast.Expr, state string, info *types.Info
 	return connectionUnknown
 }
 
+// transfer 处理赋值与变量声明语句，把右值的连接类型传递给左侧标识符，返回新状态。
 func (c *connectionTracker) transfer(node ast.Node, state string, info *types.Info) string {
 	var lhs []ast.Expr
 	var rhs []ast.Expr
@@ -159,6 +173,8 @@ func (c *connectionTracker) transfer(node ast.Node, state string, info *types.In
 	return state
 }
 
+// nonTransactionConnection 判断 call 是否在非事务连接上执行了数据库操作
+// （database/sql 的 DB、Conn、非事务 Stmt，或接收者不是事务的 gorm.DB）。
 func nonTransactionConnection(call *ast.CallExpr, fn *types.Func, info *types.Info, tracker *connectionTracker, state string) bool {
 	if fn.Pkg() == nil {
 		return false

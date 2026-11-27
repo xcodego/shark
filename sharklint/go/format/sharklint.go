@@ -13,9 +13,11 @@ import (
 
 // Violation 表示一处未通过 gofmt 格式化的文件。
 type Violation struct {
+	// Position 是文件内与 gofmt 结果首个不一致的位置。
 	Position token.Position
 }
 
+// Error 返回带位置信息的违规描述。
 func (v Violation) Error() string {
 	return fmt.Sprintf("%s: Go 文件未通过 gofmt 格式化", v.Position)
 }
@@ -62,6 +64,8 @@ func Lint(dir string) error {
 	return errors.Join(errs...)
 }
 
+// firstDifference 逐字节比较 source 与 gofmt 结果, 返回首个差异处的行列位置;
+// 两者完全一致时返回 false。
 func firstDifference(path string, source, formatted []byte) (token.Position, bool) {
 	offset := 0
 	for offset < len(source) && offset < len(formatted) && source[offset] == formatted[offset] {

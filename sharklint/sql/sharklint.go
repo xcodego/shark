@@ -1,4 +1,4 @@
-// Package sharklint_sql 检查手写 SQL 和表名、字段名的使用。
+// Package sql 检查手写 SQL、表名和字段名常量的使用，以及事务使用规范。
 package sql
 
 import (
@@ -16,19 +16,25 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
+// forceIgnorePattern 匹配“force ignore sharklint: sql”豁免注释；
+// 该注释须单独位于被检查调用的上一行。
 var forceIgnorePattern = regexp.MustCompile(`force[ \t]+ignore[ \t]+sharklint[ \t]*:[ \t]*sql\b`)
 
 // Violation 表示一处 SQL 使用规范违规。
 type Violation struct {
+	// Position 是违规代码的位置。
 	Position token.Position
-	Reason   string
+	// Reason 是违规原因。
+	Reason string
 }
 
+// Error 实现 error 接口，格式为“位置: 原因”。
 func (v Violation) Error() string {
 	return fmt.Sprintf("%s: %s", v.Position, v.Reason)
 }
 
-// Lint 检查当前构建条件下的非测试 Go 包，报告包加载错误和违规。
+// Lint 检查 dir 中当前构建条件下的非测试 Go 包，报告包加载错误、SQL 使用违规和事务违规。
+// 目录必须在 Go 模块或工作区内。
 func Lint(dir string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
@@ -37,6 +43,7 @@ func Lint(dir string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("检查目录 %q 失败: 不是目录", dir)
 	}
+	// 空目录不需要处于模块中，也无需调用 go list。
 	hasGoFile := false
 	err = filepath.WalkDir(dir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -72,6 +79,7 @@ func Lint(dir string) error {
 			if strings.HasSuffix(pkg.Fset.PositionFor(file.Pos(), false).Filename, "_test.go") {
 				continue
 			}
+			// built、maps 是文件级的预扫描结果，供 checkCall 判断变量是否安全。
 			built := builtSQLVariables(file, pkg.TypesInfo)
 			maps := mapVariables(file, pkg.TypesInfo)
 			errs = append(errs, checkTransactions(file, pkg.Fset, pkg.TypesInfo)...)
@@ -95,11 +103,14 @@ func Lint(dir string) error {
 	return errors.Join(errs...)
 }
 
+// 两类调用违规的提示文案。
 const (
 	rawSQL = "禁止直接使用或拼接 SQL，请使用构建器"
 	names  = "表名和字段名必须直接使用 app/gconst 定义的常量"
 )
 
+// calledFunc 返回 call 调用的函数，以及方法表达式（(*T).Method(recv, ...)）形式下
+// 需要跳过的接收者参数个数 offset；无法解析时 fn 为 nil。
 func calledFunc(call *ast.CallExpr, info *types.Info) (*types.Func, int) {
 	switch fun := ast.Unparen(call.Fun).(type) {
 	case *ast.SelectorExpr:
@@ -116,6 +127,10 @@ func calledFunc(call *ast.CallExpr, info *types.Info) (*types.Func, int) {
 	return nil, 0
 }
 
+// checkCall 检查一次调用是否违反 SQL 规范，返回违规原因，合规时返回空串：
+//   - database/sql：除 Stmt 外的 Query/Exec/Prepare 等不允许直接执行手写 SQL；
+//   - gorm：Raw/Exec 禁用，条件方法的条件须由构建器产生，表名、字段名须来自 app/gconst；
+//   - sharksql：表名、字段名参数须来自 app/gconst，Case/When 一类禁用。
 func checkCall(call *ast.CallExpr, info *types.Info, built, maps map[types.Object]bool) string {
 	fn, offset := calledFunc(call, info)
 	if fn == nil || fn.Pkg() == nil || offset > len(call.Args) {
@@ -208,7 +223,8 @@ func checkCall(call *ast.CallExpr, info *types.Info, built, maps map[types.Objec
 	return ""
 }
 
-// sqlNameArgs 返回表名、字段名和别名参数的位置。
+// sqlNameArgs 返回 sharksql 函数中表名、字段名和别名参数的下标 indices，
+// 以及从哪个下标起的变长参数全部是名称（variadic，-1 表示没有）。
 func sqlNameArgs(name string) ([]int, int) {
 	switch name {
 	case "Eq", "Neq", "Gt", "Gte", "Lt", "Lte", "Like", "NotLike", "LikeLeft", "LikeRight",
@@ -240,6 +256,8 @@ func sqlNameArgs(name string) ([]int, int) {
 	return nil, -1
 }
 
+// nameArg 判断 expr 是否是合法的表名或字段名：app/gconst 常量、sharksql 构建器调用，
+// 或全部元素满足前述条件的切片字面量。
 func nameArg(expr ast.Expr, info *types.Info) bool {
 	expr = ast.Unparen(expr)
 	switch e := expr.(type) {
@@ -267,6 +285,7 @@ func nameArg(expr ast.Expr, info *types.Info) bool {
 	return false
 }
 
+// isGconst 判断 obj 是否是 app/gconst 包中定义的常量。
 func isGconst(obj types.Object) bool {
 	c, ok := obj.(*types.Const)
 	if !ok || c.Pkg() == nil {
@@ -276,6 +295,9 @@ func isGconst(obj types.Object) bool {
 	return path == "app/gconst" || strings.HasSuffix(path, "/app/gconst")
 }
 
+// conditionArg 判断 Where 一类方法的条件参数是否合规：
+// 构建器变量或构建器调用、非字符串类型的结构体条件，以及键全为 gconst 常量的 map 合规；
+// 字符串和 interface 条件不合规。
 func conditionArg(expr ast.Expr, info *types.Info, built, maps map[types.Object]bool) bool {
 	expr = ast.Unparen(expr)
 	if builtVariable(expr, info, built) {
@@ -305,11 +327,14 @@ func conditionArg(expr ast.Expr, info *types.Info, built, maps map[types.Object]
 	return true
 }
 
+// builtVariable 判断 expr 是否是被 builtSQLVariables 认定为安全的变量。
 func builtVariable(expr ast.Expr, info *types.Info, built map[types.Object]bool) bool {
 	id, ok := ast.Unparen(expr).(*ast.Ident)
 	return ok && built[info.Uses[id]]
 }
 
+// mapNames 判断 expr 是否是键全部为 gconst 常量的 map（字面量，或经 maps 认定的变量），
+// 支持取地址形式。
 func mapNames(expr ast.Expr, info *types.Info, maps map[types.Object]bool) bool {
 	if unary, ok := ast.Unparen(expr).(*ast.UnaryExpr); ok && unary.Op == token.AND {
 		expr = unary.X
@@ -337,7 +362,9 @@ func mapNames(expr ast.Expr, info *types.Info, maps map[types.Object]bool) bool 
 	return true
 }
 
-// 仅认可本文件内由字面量初始化、且所有索引赋值均使用常量键的 map。
+// mapVariables 返回 map 变量是否只含 gconst 常量键。
+// 仅认可本文件内由字面量初始化、且所有索引赋值均使用常量键的 map；
+// 多次赋值，或被赋值给其他变量（可能被修改）的 map 一律不认可。
 func mapVariables(file *ast.File, info *types.Info) map[types.Object]bool {
 	maps := make(map[types.Object]bool)
 	seen := make(map[types.Object]bool)
@@ -415,6 +442,7 @@ func mapVariables(file *ast.File, info *types.Info) map[types.Object]bool {
 	return maps
 }
 
+// builtSQLVariables 返回变量是否是安全的构建器结果。
 // 只接受唯一一次赋值来自构建器的变量，避免把后续重新赋值的 SQL 当作安全结果。
 func builtSQLVariables(file *ast.File, info *types.Info) map[types.Object]bool {
 	built := make(map[types.Object]bool)
@@ -470,6 +498,7 @@ func builtSQLVariables(file *ast.File, info *types.Info) map[types.Object]bool {
 	return built
 }
 
+// isBuilderCall 判断 expr 是否是 sharksql 构建器函数的调用。
 func isBuilderCall(expr ast.Expr, info *types.Info) bool {
 	call, ok := ast.Unparen(expr).(*ast.CallExpr)
 	if !ok {
@@ -479,6 +508,8 @@ func isBuilderCall(expr ast.Expr, info *types.Info) bool {
 	return isBuilderFunc(fn)
 }
 
+// isBuilderFunc 判断 fn 是否是 sharksql 中产出 SQL 片段的构建器函数
+// （Build、Where，或带名称参数的条件、表达式函数）。
 func isBuilderFunc(fn *types.Func) bool {
 	if fn == nil || fn.Pkg() == nil || fn.Pkg().Path() != "github.com/xcodego/shark/sharksql" {
 		return false
@@ -490,6 +521,7 @@ func isBuilderFunc(fn *types.Func) bool {
 	return len(indices) != 0 || variadic >= 0
 }
 
+// hasForceIgnoreComment 判断 line 的上一行是否以豁免注释结尾。
 func hasForceIgnoreComment(file *ast.File, fset *token.FileSet, line int) bool {
 	for _, group := range file.Comments {
 		if fset.PositionFor(group.End(), false).Line == line-1 &&

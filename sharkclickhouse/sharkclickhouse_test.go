@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"net"
-	"os"
 	"testing"
 	"time"
 )
 
+// TestNewInvalidConfig 验证 nil、空配置和空 Host 地址都会返回错误。
 func TestNewInvalidConfig(t *testing.T) {
 	for _, cfg := range []*Config{nil, {}, {Host: []string{""}}} {
 		if _, err := New(context.Background(), cfg); err == nil {
@@ -17,6 +17,7 @@ func TestNewInvalidConfig(t *testing.T) {
 	}
 }
 
+// TestNewConnectionFailure 验证连接不可用的地址（先监听再关闭得到）会返回错误。
 func TestNewConnectionFailure(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -33,6 +34,7 @@ func TestNewConnectionFailure(t *testing.T) {
 	}
 }
 
+// TestNewCanceledContext 验证已取消的 ctx 会让 New 返回 context.Canceled。
 func TestNewCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -41,18 +43,15 @@ func TestNewCanceledContext(t *testing.T) {
 	}
 }
 
+// TestIntegration 连接真实 ClickHouse 执行一条查询，依赖内网环境，环境不可达时会失败。
 func TestIntegration(t *testing.T) {
-	host := os.Getenv("CLICKHOUSE_TEST_HOST")
-	if host == "" {
-		t.Skip("set CLICKHOUSE_TEST_HOST to run against ClickHouse")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	client, err := New(ctx, &Config{
-		Host:     []string{host},
-		User:     os.Getenv("CLICKHOUSE_TEST_USER"),
-		Password: os.Getenv("CLICKHOUSE_TEST_PASSWORD"),
-		Database: os.Getenv("CLICKHOUSE_TEST_DATABASE"),
+		Host:     []string{"192.168.191.100:19000"},
+		User:     "admin",
+		Password: "CEki57pxTJyYaLD",
+		Database: "kgame",
 	})
 	if err != nil {
 		t.Fatal(err)

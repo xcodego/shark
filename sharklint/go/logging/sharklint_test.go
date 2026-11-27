@@ -10,6 +10,7 @@ import (
 	"github.com/xcodego/shark/sharklint/go/logging"
 )
 
+// writeFile 创建 path 的父目录并写入 content, 供测试构造源码文件。
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -20,6 +21,7 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// TestLintReportsDisallowedLogging 验证直接打印、zap 全局 Logger 与直接创建 Logger 被报告。
 func TestLintReportsDisallowedLogging(t *testing.T) {
 	dir := t.TempDir()
 	source := `package example
@@ -68,6 +70,7 @@ func bad(logger *z.Logger) {
 	}
 }
 
+// TestLintAliasesDotImportsAndFactory 验证别名、点导入、内置 print 的识别, 以及 sharklog.New 和 CLI 输出的例外。
 func TestLintAliasesDotImportsAndFactory(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "logging.go"), `package example
@@ -95,6 +98,7 @@ func main() { fmt.Fprintln(nil, "command output") }
 	}
 }
 
+// TestLintRejectsLogAndSlogImports 验证 log、log/slog 导入被禁止, sharkdb 的 slog 适配文件除外。
 func TestLintRejectsLogAndSlogImports(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "logging.go"), `package example
@@ -123,6 +127,7 @@ var _ *slog.Logger
 	}
 }
 
+// TestLintForceIgnoreAndErrors 验证豁免注释及各类错误的报告。
 func TestLintForceIgnoreAndErrors(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "logging.go"), `package example

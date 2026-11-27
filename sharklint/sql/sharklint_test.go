@@ -11,6 +11,7 @@ import (
 	sharklint_sql "github.com/xcodego/shark/sharklint/sql"
 )
 
+// writeFile 创建 path 的父目录并写入 content。
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -21,6 +22,7 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// TestLintSQL 验证手写 SQL、非 gconst 表名字段名及 sharksql 参数的违规识别，以及豁免注释。
 func TestLintSQL(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "go.mod"), `module example.com/project
@@ -183,6 +185,7 @@ func run(db *g.DB, raw *sql.DB, ctx context.Context, id int) {
 	}
 }
 
+// TestLintErrors 验证空目录、目录不存在、非目录和加载失败的处理。
 func TestLintErrors(t *testing.T) {
 	dir := t.TempDir()
 	if err := sharklint_sql.Lint(dir); err != nil {
@@ -203,6 +206,7 @@ func TestLintErrors(t *testing.T) {
 	}
 }
 
+// TestRealDependencies 用真实 gorm 与 sharksql 依赖的 testdata 验证违规识别。
 func TestRealDependencies(t *testing.T) {
 	err := sharklint_sql.Lint(filepath.Join("testdata", "real"))
 	if err == nil || strings.Contains(err.Error(), "加载 Go 包失败") {

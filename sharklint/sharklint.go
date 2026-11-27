@@ -1,3 +1,4 @@
+// Package sharklint 聚合 shark 项目的全部 Go 源码检查器, 提供统一的 Lint 入口。
 package sharklint
 
 import (
@@ -18,6 +19,7 @@ import (
 	sharklint_swagger "github.com/xcodego/shark/sharklint/swagger"
 )
 
+// Lint 依次运行所有子检查器扫描 dir, 并把各检查器的错误合并后返回; 全部通过时返回 nil。
 func Lint(dir string) error {
 	return errors.Join(
 		any.Lint(dir),

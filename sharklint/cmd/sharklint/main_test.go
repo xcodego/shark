@@ -8,6 +8,7 @@ import (
 	"testing"
 )
 
+// TestRun 验证参数错误、违规、目录缺失与通过时的退出码和输出。
 func TestRun(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "main.go")
@@ -38,6 +39,7 @@ func TestRun(t *testing.T) {
 	}
 }
 
+// TestRunRedisKeys 验证入口会运行 Redis KEYS 命令检查。
 func TestRunRedisKeys(t *testing.T) {
 	var stderr bytes.Buffer
 	if code := run([]string{filepath.Join("..", "..", "redis", "testdata", "real")}, &stderr); code != 1 {
@@ -49,6 +51,7 @@ func TestRunRedisKeys(t *testing.T) {
 	}
 }
 
+// TestRunSQL 验证入口会运行 SQL 使用规范检查。
 func TestRunSQL(t *testing.T) {
 	var stderr bytes.Buffer
 	if code := run([]string{filepath.Join("..", "..", "sql", "testdata", "real")}, &stderr); code != 1 {
@@ -61,6 +64,7 @@ func TestRunSQL(t *testing.T) {
 	}
 }
 
+// TestRunAny 验证入口会运行 interface{} 检查。
 func TestRunAny(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "main.go")
@@ -77,6 +81,7 @@ func TestRunAny(t *testing.T) {
 	}
 }
 
+// TestRunPanic 验证入口会运行 panic 检查, 且 main 函数内的 panic 不报告。
 func TestRunPanic(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/project\n\ngo 1.26\n"), 0644); err != nil {
@@ -109,6 +114,7 @@ func helper() {
 	}
 }
 
+// TestRunMapRace 验证入口会运行异步闭包 map 访问检查。
 func TestRunMapRace(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/project\n\ngo 1.26\n"), 0644); err != nil {
@@ -128,6 +134,7 @@ func TestRunMapRace(t *testing.T) {
 	}
 }
 
+// TestRunSyncPair 验证入口会运行同步操作配对检查。
 func TestRunSyncPair(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/project\n\ngo 1.26\n"), 0644); err != nil {
@@ -147,6 +154,7 @@ func TestRunSyncPair(t *testing.T) {
 	}
 }
 
+// TestRunFormat 验证入口会运行 gofmt 格式检查。
 func TestRunFormat(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "main.go")
@@ -163,6 +171,7 @@ func TestRunFormat(t *testing.T) {
 	}
 }
 
+// TestRunVet 验证入口会运行 go vet, 且诊断可定位到文件。
 func TestRunVet(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/project\n\ngo 1.26\n"), 0644); err != nil {
@@ -183,6 +192,7 @@ func TestRunVet(t *testing.T) {
 	}
 }
 
+// TestRunUnreachableOnce 验证不可达代码只被报告一次（vet 与 unreachable 检查不重复）。
 func TestRunUnreachableOnce(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/project\n\ngo 1.26\n"), 0644); err != nil {
@@ -213,6 +223,7 @@ func NewBinlogEvent(table any, data map[string]any) {
 	}
 }
 
+// TestRunRedisCommands 验证入口会运行 Redis 禁用命令检查。
 func TestRunRedisCommands(t *testing.T) {
 	var stderr bytes.Buffer
 	if code := run([]string{filepath.Join("..", "..", "redis", "testdata", "realcommands")}, &stderr); code != 1 {

@@ -1,4 +1,4 @@
-// Package redis 检查 Redis 客户端的禁用命令和 key。
+// Package redis 检查 Redis 客户端的禁用命令（KEYS、FLUSHALL 等）以及直接构造的 key。
 package redis
 
 import (
@@ -17,15 +17,21 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
+// forceIgnorePattern 匹配“force ignore sharklint: redis”豁免注释；
+// 该注释须单独位于被检查调用的上一行。
 var forceIgnorePattern = regexp.MustCompile(`force[ \t]+ignore[ \t]+sharklint[ \t]*:[ \t]*redis\b`)
 
-// Violation 表示一处 Redis 禁用命令调用。
+// Violation 表示一处 Redis 违规：禁用命令调用或不规范的 key。
 type Violation struct {
+	// Position 是违规代码的位置。
 	Position token.Position
-	Command  string
-	Reason   string
+	// Command 是被禁用的命令名（大写，如 "KEYS"、"CLIENT KILL"）；key 违规时为空。
+	Command string
+	// Reason 非空时直接作为错误信息，优先于 Command 生成的默认文案。
+	Reason string
 }
 
+// Error 实现 error 接口：优先输出 Reason，否则按 Command 生成提示。
 func (v Violation) Error() string {
 	if v.Reason != "" {
 		return fmt.Sprintf("%s: %s", v.Position, v.Reason)
@@ -36,7 +42,7 @@ func (v Violation) Error() string {
 	return fmt.Sprintf("%s: 禁止使用 Redis %s 命令", v.Position, v.Command)
 }
 
-// Lint 检查 dir 中当前构建条件下的非测试 Go 包。
+// Lint 检查 dir 中当前构建条件下的非测试 Go 包，包括禁用命令与 key 构造规范。
 // 目录必须在 Go 模块或工作区内；类型或加载错误会一并返回。
 func Lint(dir string) error {
 	info, err := os.Lstat(dir)
@@ -105,6 +111,8 @@ func Lint(dir string) error {
 	return errors.Join(errs...)
 }
 
+// forbiddenCall 判断 call 是否调用了受支持 Redis 客户端的禁用命令，
+// 返回规范化后的命令名；不是禁用命令时返回空串。
 func forbiddenCall(call *ast.CallExpr, info *types.Info) string {
 	var fn *types.Func
 	var selection *types.Selection
@@ -131,6 +139,8 @@ func forbiddenCall(call *ast.CallExpr, info *types.Info) string {
 	return ""
 }
 
+// goRedisCommand 处理 go-redis 与 rueidiscompat：
+// 既识别 KEYS 等具名方法，也识别 Do/NewCmd 等原始命令入口的首个参数。
 func goRedisCommand(call *ast.CallExpr, info *types.Info, fn *types.Func, selection *types.Selection) string {
 	signature, ok := fn.Type().(*types.Signature)
 	if !ok {
@@ -148,7 +158,7 @@ func goRedisCommand(call *ast.CallExpr, info *types.Info, fn *types.Func, select
 		return rawCommand(call, info, index)
 	default:
 		if selection != nil {
-			// Sentinel MONITOR configures a Sentinel master, not the Redis MONITOR command.
+			// SentinelClient.Monitor 用于配置哨兵监控的 master，不是 Redis 的 MONITOR 命令。
 			if fn.Name() == "Monitor" && signature.Recv() != nil {
 				recv := signature.Recv().Type()
 				if ptr, ok := recv.(*types.Pointer); ok {
@@ -174,6 +184,7 @@ func goRedisCommand(call *ast.CallExpr, info *types.Info, fn *types.Func, select
 	}
 }
 
+// redigoCommand 处理 redigo：命令名是 Do/Send/DoContext/DoWithTimeout 中的字符串参数。
 func redigoCommand(call *ast.CallExpr, info *types.Info, fn *types.Func, selection *types.Selection) string {
 	index := 0
 	switch fn.Name() {
@@ -200,6 +211,8 @@ func redigoCommand(call *ast.CallExpr, info *types.Info, fn *types.Func, selecti
 	return rawCommand(call, info, index)
 }
 
+// rueidisCommand 处理 rueidis 的命令构造器：
+// 具名方法直接映射命令，Arbitrary 构造器及 CLIENT KILL/PAUSE 子命令按原始参数识别。
 func rueidisCommand(call *ast.CallExpr, info *types.Info, fn *types.Func, selection *types.Selection) string {
 	if selection == nil {
 		return ""
@@ -241,6 +254,8 @@ func rueidisCommand(call *ast.CallExpr, info *types.Info, fn *types.Func, select
 	return methodCommand(fn.Name())
 }
 
+// arbitraryClient 判断 call 是否为 Arbitrary("CLIENT") 且之后尚未追加其他参数，
+// 用于识别 Arbitrary("CLIENT").Args("KILL") 这类链式写法。
 func arbitraryClient(call *ast.CallExpr, info *types.Info) bool {
 	selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
 	if !ok || selector.Sel.Name != "Arbitrary" {
@@ -265,6 +280,8 @@ func arbitraryClient(call *ast.CallExpr, info *types.Info) bool {
 	return len(call.Args) == index+1
 }
 
+// methodCommand 将具名方法（如 FlushAllAsync、ClientKill）映射为被禁用的命令名，
+// 未被禁用时返回空串。
 func methodCommand(name string) string {
 	switch strings.ToUpper(name) {
 	case "KEYS", "FLUSHALL", "FLUSHDB", "SHUTDOWN", "SAVE", "BGSAVE",
@@ -288,6 +305,8 @@ func methodCommand(name string) string {
 	return ""
 }
 
+// rawCommand 判断原始命令参数（从 index 起）是否为被禁用命令，
+// CLIENT 仅在子命令为 KILL 或 PAUSE 时才算。
 func rawCommand(call *ast.CallExpr, info *types.Info, index int) string {
 	command := argumentString(call, info, index)
 	switch command {
@@ -303,6 +322,8 @@ func rawCommand(call *ast.CallExpr, info *types.Info, index int) string {
 	return ""
 }
 
+// argumentString 返回第 index 个命令参数的常量字符串（大写），非常量时返回空串。
+// 对 args... 展开调用，仅在展开项是复合字面量时按其元素（含 [i]=v 键值形式）取值。
 func argumentString(call *ast.CallExpr, info *types.Info, index int) string {
 	if call.Ellipsis.IsValid() && len(call.Args) > 0 && index >= len(call.Args)-1 {
 		literal, ok := ast.Unparen(call.Args[len(call.Args)-1]).(*ast.CompositeLit)
@@ -337,6 +358,7 @@ func argumentString(call *ast.CallExpr, info *types.Info, index int) string {
 	return constantString(info, call.Args[index])
 }
 
+// constantString 返回 expr 的字符串常量值（转为大写），不是字符串常量时返回空串。
 func constantString(info *types.Info, expr ast.Expr) string {
 	value := info.Types[expr].Value
 	if value != nil && value.Kind() == constant.String {
@@ -345,6 +367,7 @@ func constantString(info *types.Info, expr ast.Expr) string {
 	return ""
 }
 
+// hasForceIgnoreComment 判断 line 的上一行是否以豁免注释结尾。
 func hasForceIgnoreComment(file *ast.File, fset *token.FileSet, line int) bool {
 	for _, group := range file.Comments {
 		if fset.PositionFor(group.End(), false).Line == line-1 &&

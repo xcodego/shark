@@ -13,6 +13,7 @@ import (
 	"github.com/xcodego/shark/sharkclickhouse"
 )
 
+// TestClickHouseConfig 验证 ClickHouse 配置的解析、环境变量密码，以及 WithClickHouse 忽略空配置。
 func TestClickHouseConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	data := []byte("clickhouse:\n  host: \"host1:9000,host2:9000\"\n  user: default\n  database: analytics\n  tls: true\n")
@@ -41,6 +42,7 @@ func TestClickHouseConfig(t *testing.T) {
 	}
 }
 
+// TestClickHousePasswordDecryption 验证配置中的 RSA 加密密码会被解密。
 func TestClickHousePasswordDecryption(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -60,6 +62,7 @@ func TestClickHousePasswordDecryption(t *testing.T) {
 	}
 }
 
+// TestClickHouseConnectionFailure 验证 ClickHouse 地址无效时 New 返回错误。
 func TestClickHouseConnectionFailure(t *testing.T) {
 	opts := (&Options{}).WithClickHouse(&sharkclickhouse.Config{Host: []string{""}})
 	if _, err := New(opts); err == nil {
@@ -67,6 +70,7 @@ func TestClickHouseConnectionFailure(t *testing.T) {
 	}
 }
 
+// TestClickHouseConnection 连接真实 ClickHouse 并执行查询，需设置 CLICKHOUSE_TEST_HOST，否则跳过。
 func TestClickHouseConnection(t *testing.T) {
 	host := os.Getenv("CLICKHOUSE_TEST_HOST")
 	if host == "" {

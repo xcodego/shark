@@ -1,4 +1,4 @@
-// Package vet 使用 go vet 检查 Go 包。
+// Package vet 使用 go vet 检查 Go 包; unreachable 分析器由 unreachable 包单独负责。
 package vet
 
 import (
@@ -12,9 +12,11 @@ import (
 	"strings"
 )
 
+// diagnosticPattern 匹配 go vet 输出中 "文件:行:列:消息" 形式的诊断行。
 var diagnosticPattern = regexp.MustCompile(`^(.+\.go):([0-9]+):([0-9]+):(.*)$`)
 
-// Lint 在 dir 中运行 go vet ./...；空目录会跳过检查。
+// Lint 在 dir 中运行 go vet -unreachable=false ./...（关闭 unreachable 分析器, 避免与 unreachable 包重复报告）;
+// dir 下没有 .go 文件时跳过检查。
 func Lint(dir string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
@@ -57,6 +59,7 @@ func Lint(dir string) error {
 	return fmt.Errorf("运行 go vet -unreachable=false ./... 失败: %w", err)
 }
 
+// absoluteDiagnostics 把输出中相对路径的诊断行改写为基于 dir 的路径, 便于直接定位文件。
 func absoluteDiagnostics(dir, output string) string {
 	lines := strings.Split(output, "\n")
 	for i, line := range lines {

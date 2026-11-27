@@ -14,157 +14,30 @@ import (
 	"gorm.io/gorm"
 )
 
-// TableScan 提供基于 Keyset Pagination（游标分页）的高性能表扫描功能。
-//
-// 仅限后端内部代码使用：Asc/Desc 的排序字段必须是代码中固定的、可信的数据库列名，
-// 不得直接使用前端请求提交的字段名。该约束使调用方可以按索引设计组织排序字段，
-// 本工具不负责将不可信输入转换为排序列。
-//
-// 核心优势：
-// 相比传统 LIMIT/OFFSET 分页（SELECT * FROM user LIMIT 100000, 20），
-// TableScan 使用“上一条记录”作为游标进行分页：
-//
-//	SELECT * FROM user
-//	WHERE id > ?
-//	ORDER BY id ASC
-//	LIMIT 20
-//
-// 优点：
-//   - 深分页性能极高（不受 offset 影响）
-//   - 不会随着页数增加变慢
-//   - 可利用索引范围扫描
-//   - 适合大表扫描、增量同步、数据导出、消息消费
-//
-// Keyset 游标 SQL 原理（以 Asc("create_time","id") 为例）：
-//
-// 下一页（Next）：
-//
-//	WHERE
-//	(
-//	    create_time > ?                          -- 第一排序字段大于游标值
-//	)
-//	OR
-//	(
-//	    create_time = ? AND id > ?              -- 第一字段相等时，比较第二字段
-//	)
-//	ORDER BY create_time ASC, id ASC
-//
-// 上一页（Prev，内部自动反转 ORDER BY 并 reverse 结果）：
-//
-//	WHERE
-//	(
-//	    create_time < ?
-//	)
-//	OR
-//	(
-//	    create_time = ? AND id < ?
-//	)
-//	ORDER BY create_time DESC, id DESC
-//	（查询后反转切片，保证返回顺序与 Next 一致）
-//
-// 注意事项：
-//  1. 排序字段必须建立联合索引（否则全表扫描）
-//  2. 排序字段的值必须稳定（不可在扫描过程中被修改）
-//  3. 最后一个排序字段最好唯一（如 id），避免漏数据
-//  4. 不允许排序字段存在 NULL（NULL 无法比较）
-//  5. 模型里不要用裸 []string / []int 等非结构体切片当列
-//
-// 推荐配置：
-//
-//	scan := NewTableScan[User]().
-//	    PageSize(200).
-//	    Asc("create_time", "id")
-//
-// 对应索引：
-//
-//	CREATE INDEX idx_ctime_id ON user(create_time, id);
-//
-// 典型使用示例（全表扫描导出）：
-//
-//	scan := sharkdb.NewTableScan[User]().
-//	    PageSize(500).
-//	    Asc("create_time", "id")
-//
-//	var last *User
-//	for {
-//	    results, err := scan.Next(db.Where("deleted = 0"), last)
-//	    if err != nil {
-//	        panic(err)
-//	    }
-//	    if len(results) == 0 {
-//	        break // 扫描完毕
-//	    }
-//	    last = &results[len(results)-1] // 游标指向本页最后一条
-//	    for _, u := range results {
-//	        fmt.Println(u.Id, u.Name)
-//	    }
-//	}
-
-// tableScanOrder 表示排序字段及方向。
-// 未导出，仅供 TableScan 内部使用。
+// tableScanOrder 是一个排序字段及其方向。
 type tableScanOrder struct {
-	columns string // 字段名（支持 struct 字段名 / gorm column tag / json tag）
+	columns string // 列名（同时用于 SQL 和从游标记录取值，匹配规则见 getFieldValue）
 	order   string // 排序方向："asc" 或 "desc"
 }
 
-// TableScan 是泛型表扫描器，支持游标分页（Keyset Pagination）双向翻页。
+// TableScan 是基于 Keyset 游标的双向分页与批量导出扫描器。
 //
-// 泛型参数 T 为表对应的 GORM 模型类型。
-//
-// 使用前必须配置：
-//  1. PageSize：每页行数（建议 100~500）
-//  2. Asc 或 Desc：排序字段（必须与数据库索引匹配）
-//
-// 零值 TableScan 不可直接使用，必须通过 NewTableScan() 创建并链式配置。
-//
-// 链式配置示例：
-//
-//	scan := sharkdb.NewTableScan[User]().
-//	    PageSize(200).
-//	    Asc("create_time").
-//	    Asc("id")
+// 排序字段（Asc/Desc）会直接拼入 ORDER BY 和游标 WHERE，必须是后端固定的可信列名，
+// 不能来自用户输入；多个排序字段合起来应能唯一确定一行（如末尾加主键），
+// 并与数据库索引匹配，否则翻页会漏行或重复。
 type TableScan[T any] struct {
-	pagesize int              // 默认每页 5000 行
+	pagesize int              // 每页行数，默认 5000
 	orders   []tableScanOrder // 排序字段列表（多字段联合排序）
 }
 
-// NewTableScan 创建一个泛型表扫描器。
-// T 为 GORM 模型类型（如 User、Order 等）。
-//
-// 使用示例：
-//
-//	// 创建扫描器并链式配置
-//	scan := sharkdb.NewTableScan[User]().
-//	    PageSize(200).
-//	    Asc("create_time", "id")
-//
-//	// 全表扫描
-//	var last *User
-//	for {
-//	    results, err := scan.Next(db, last)
-//	    if err != nil || len(results) == 0 {
-//	        break
-//	    }
-//	    last = &results[len(results)-1]
-//	    processBatch(results)
-//	}
+// NewTableScan 创建表扫描器，默认每页 5000 行。需先通过 Asc/Desc 配置排序字段。
 func NewTableScan[T any]() *TableScan[T] {
 	return &TableScan[T]{
-		pagesize: 5000, // 默认每页 5000 行
+		pagesize: 5000,
 	}
 }
 
-// PageSize 设置每页扫描行数。
-//
-// 参数：
-//   - size: 每页返回的最大行数。建议 100~500，太大会增加单次查询延迟，太小会增加查询次数
-//
-// 返回：*TableScan[T] 自身，支持链式调用
-//
-// 示例：
-//
-//	scan.PageSize(200)
-//	scan.PageSize(500) // 可重复调用覆盖
+// PageSize 设置每页扫描行数，非正数使用默认值。
 func (p *TableScan[T]) PageSize(size int) *TableScan[T] {
 	p.pagesize = size
 	if p.pagesize <= 0 {
@@ -173,28 +46,7 @@ func (p *TableScan[T]) PageSize(size int) *TableScan[T] {
 	return p
 }
 
-// Asc 添加升序排序字段。支持多次调用或单次传入多字段。
-//
-// 字段名支持三种匹配方式（优先级从高到低）：
-//  1. struct 字段名（如 "CreateTime"）
-//  2. gorm column tag（如 gorm:"column:create_time" → "create_time"）
-//  3. json tag（如 json:"create_time" → "create_time"）
-//
-// 参数：
-//   - columns: 后端代码中固定的排序字段名（可变参数，不得来自前端请求）
-//
-// 返回：*TableScan[T] 自身，支持链式调用
-//
-// 示例：
-//
-//	// 方式一：多次调用
-//	scan.Asc("create_time").Asc("id")
-//
-//	// 方式二：单次多字段（等价）
-//	scan.Asc("create_time", "id")
-//
-//	// 方式三：使用 gorm column tag 名
-//	scan.Asc("create_time", "auto_id")
+// Asc 追加升序排序字段，多次调用按顺序联合排序。字段必须是可信列名。
 func (p *TableScan[T]) Asc(columns ...string) *TableScan[T] {
 	for _, column := range columns {
 		p.orders = append(p.orders, tableScanOrder{columns: column, order: "asc"})
@@ -202,20 +54,7 @@ func (p *TableScan[T]) Asc(columns ...string) *TableScan[T] {
 	return p
 }
 
-// Desc 添加降序排序字段。字段名匹配规则同 Asc。
-//
-// 参数：
-//   - columns: 后端代码中固定的排序字段名（可变参数，不得来自前端请求）
-//
-// 返回：*TableScan[T] 自身，支持链式调用
-//
-// 示例：
-//
-//	// 按分数降序 + ID 升序
-//	scan.Desc("score").Asc("id")
-//
-//	// 单次多字段
-//	scan.Desc("score", "create_time")
+// Desc 追加降序排序字段，多次调用按顺序联合排序。字段必须是可信列名。
 func (p *TableScan[T]) Desc(columns ...string) *TableScan[T] {
 	for _, column := range columns {
 		p.orders = append(p.orders, tableScanOrder{columns: column, order: "desc"})
@@ -223,15 +62,8 @@ func (p *TableScan[T]) Desc(columns ...string) *TableScan[T] {
 	return p
 }
 
-// getFieldValueFromStruct 递归搜索结构体（包含嵌入结构体）中匹配指定标签的字段值。
-//
-// 参数：
-//   - v:    结构体的 reflect.Value
-//   - t:    结构体的 reflect.Type
-//   - name: 要匹配的字段名
-//   - tagName: 标签类型（"gorm" 或 "json"），决定按哪种标签匹配
-//
-// 返回值：匹配成功时返回字段值，否则返回 nil。
+// getFieldValueFromStruct 递归（含嵌入结构体）查找 tagName 标签（"gorm" 的 column: 或 "json"）等于 name 的字段，
+// 找到返回字段值，否则返回 nil。
 func getFieldValueFromStruct(v reflect.Value, t reflect.Type, name string, tagName string) any {
 	for i := 0; i < t.NumField(); i++ {
 		sf := t.Field(i)
@@ -239,7 +71,7 @@ func getFieldValueFromStruct(v reflect.Value, t reflect.Type, name string, tagNa
 
 		// 嵌入（匿名）结构体：递归搜索其内部字段
 		if sf.Anonymous {
-			// 处理嵌入指针类型（如 *gdbmodel.XGameOrder）
+			// 嵌入指针需解引用，nil 则跳过
 			if fv.Kind() == reflect.Ptr {
 				if fv.IsNil() {
 					continue
@@ -288,18 +120,11 @@ func getFieldValueFromStruct(v reflect.Value, t reflect.Type, name string, tagNa
 	return nil
 }
 
-// getFieldValue 从模型对象中获取指定字段的值。
+// getFieldValue 按 name 从模型对象取游标值；name 含 "." 时只取最后一段（去掉表名前缀）。
 //
-// 字段名匹配优先级（从高到低）：
-//  1. struct 字段名（直接通过 FieldByName 匹配，支持嵌入字段）
-//  2. gorm column tag（遍历所有字段的 gorm:"column:xxx" 标签，递归搜索嵌入结构体）
-//  3. json tag（遍历所有字段的 json:"xxx" 标签，递归搜索嵌入结构体）
-//
-// 若三层匹配均未找到，返回 nil。
-//
-// 参数：
-//   - obj:  模型对象指针
-//   - name: 要获取的字段名（用于游标值比较）
+// 匹配优先级：struct 字段名（含嵌入字段）> gorm column tag > json tag。
+// 均未找到返回 nil，此时游标条件会以 NULL 比较，导致翻页结果为空或不正确，
+// 因此排序字段必须能在 T 中按上述规则找到。
 func getFieldValue[T any](obj *T, name string) any {
 	if obj == nil {
 		return nil
@@ -317,32 +142,26 @@ func getFieldValue[T any](obj *T, name string) any {
 		return nil
 	}
 	t := v.Type()
-	// 第一层：直接按 struct 字段名查找（FieldByName 已支持递归搜索嵌入字段）
+	// 先按 struct 字段名查找（FieldByName 已支持嵌入字段）
 	field := v.FieldByName(name)
 	if field.IsValid() && field.CanInterface() {
 		return field.Interface()
 	}
-	// 第二层：按 gorm column tag 查找（递归搜索嵌入结构体）
+	// 再按 gorm column tag
 	if result := getFieldValueFromStruct(v, t, name, "gorm"); result != nil {
 		return result
 	}
-	// 第三层：按 json tag 查找（递归搜索嵌入结构体）
+	// 最后按 json tag
 	if result := getFieldValueFromStruct(v, t, name, "json"); result != nil {
 		return result
 	}
 	return nil
 }
 
-// Next 获取下一页数据（游标分页前向扫描）。
+// Next 获取游标 last 之后的下一页数据，顺序由 Asc/Desc 定义。
 //
-// 参数：
-//   - db:   已应用 WHERE 条件的 GORM 查询（如 db.Where("deleted = 0")）。
-//     内部会 New Session 避免污染原 db。
-//   - last: 上一页的最后一条记录（游标）。首次查询传 nil。
-//
-// 返回值：
-//   - []T:  当前页的数据切片（顺序由 Asc/Desc 定义）
-//   - error: 查询失败时返回错误
+// db 为已应用 WHERE 条件的查询（内部使用新 Session，不污染原 db）；
+// last 为上一页最后一条记录，首次查询传 nil。未配置排序字段时不加 ORDER BY 和游标条件。
 //
 // 生成的 SQL（以 Asc("create_time", "id") 为例）：
 //
@@ -375,19 +194,17 @@ func getFieldValue[T any](obj *T, name string) any {
 //	    }
 //	}
 func (p *TableScan[T]) Next(db *gorm.DB, last *T) ([]T, error) {
-	// 创建新 Session，避免修改原始 db 的查询条件
 	tx := db.Session(&gorm.Session{})
-	// 添加 ORDER BY
 	for _, order := range p.orders {
 		tx = tx.Order(order.columns + " " + order.order)
 	}
-	// 如果提供了游标，构建 Keyset 条件（多字段游标比较）
+	// Keyset 条件：(a > ?) OR (a = ? AND b > ?) ...，逐字段展开以支持联合排序
 	if last != nil && len(p.orders) > 0 {
 		var orSQL []string
 		var args []any
 		for i := 0; i < len(p.orders); i++ {
 			var andSQL []string
-			// 前置排序字段：值相等时继续比较下一个字段
+			// 前置字段取等
 			for j := 0; j < i; j++ {
 				col := p.orders[j]
 				andSQL = append(andSQL,
@@ -397,11 +214,11 @@ func (p *TableScan[T]) Next(db *gorm.DB, last *T) ([]T, error) {
 					getFieldValue(last, col.columns),
 				)
 			}
-			// 当前排序字段：根据方向选择 > 或 <
+			// 当前字段按方向比较
 			col := p.orders[i]
 			op := ">"
 			if strings.ToLower(col.order) == "desc" {
-				op = "<" // 降序时游标比较方向反转
+				op = "<"
 			}
 			andSQL = append(andSQL,
 				fmt.Sprintf("%s %s ?", col.columns, op),
@@ -409,7 +226,6 @@ func (p *TableScan[T]) Next(db *gorm.DB, last *T) ([]T, error) {
 			args = append(args,
 				getFieldValue(last, col.columns),
 			)
-			// 每组条件用 OR 连接
 			orSQL = append(orSQL,
 				"("+strings.Join(andSQL, " AND ")+")",
 			)
@@ -424,20 +240,11 @@ func (p *TableScan[T]) Next(db *gorm.DB, last *T) ([]T, error) {
 	return list, err
 }
 
-// Prev 获取上一页数据（游标分页后向扫描）。
+// Prev 获取游标 first 之前的上一页数据，返回顺序与 Next 一致。
 //
-// 参数：
-//   - db:    已应用 WHERE 条件的 GORM 查询
-//   - first: 当前页的第一条记录（游标）
-//
-// 返回值：
-//   - []T:  上一页的数据切片（顺序与 Next 一致）
-//   - error: 查询失败时返回错误
-//
-// 实现原理：
-//  1. 反转所有 ORDER BY（ASC → DESC，DESC → ASC）
-//  2. 反转 Keyset 比较方向（> ↔ <）
-//  3. 查询后 reverse 切片，保证返回顺序与 Next() 一致
+// db 为已应用 WHERE 条件的查询；first 为当前页第一条记录。
+// 实现：反转 ORDER BY 和 Keyset 比较方向，查询后再反转切片。
+// 同一 scan 实例可交替调用 Next 和 Prev。
 //
 // 使用示例：
 //
@@ -453,12 +260,8 @@ func (p *TableScan[T]) Next(db *gorm.DB, last *T) ([]T, error) {
 //	        fmt.Println(u.Id)
 //	    }
 //	}
-//
-// 注意：
-//   - Prev 查询比 Next 多一次切片 reverse 操作（O(n)），性能差异可忽略
-//   - 同一 scan 实例可交替调用 Next 和 Prev
 func (p *TableScan[T]) Prev(db *gorm.DB, first *T) ([]T, error) {
-	// 创建新 Session 并反转 ORDER BY
+	// 反转 ORDER BY
 	tx := db.Session(&gorm.Session{})
 	for _, order := range p.orders {
 		orderType := strings.ToLower(order.order)
@@ -469,7 +272,7 @@ func (p *TableScan[T]) Prev(db *gorm.DB, first *T) ([]T, error) {
 		}
 		tx = tx.Order(order.columns + " " + orderType)
 	}
-	// 构建反向 Keyset 条件（比较方向反转：> → <）
+	// 反向 Keyset 条件，结构同 Next，比较方向相反
 	if first != nil && len(p.orders) > 0 {
 		var orSQL []string
 		var args []any
@@ -485,7 +288,6 @@ func (p *TableScan[T]) Prev(db *gorm.DB, first *T) ([]T, error) {
 				)
 			}
 			col := p.orders[i]
-			// 方向反转：前向扫描用 > 则后向用 <
 			op := "<"
 			if strings.ToLower(col.order) == "desc" {
 				op = ">"
@@ -510,28 +312,26 @@ func (p *TableScan[T]) Prev(db *gorm.DB, first *T) ([]T, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 反转切片，保证返回顺序与 Next 一致
+	// 恢复为与 Next 一致的顺序
 	for i, j := 0, len(list)-1; i < j; i, j = i+1, j-1 {
 		list[i], list[j] = list[j], list[i]
 	}
 	return list, nil
 }
 
-// ExportExcel 将全表数据导出为 Excel 文件（.xlsx）。
+// ExportExcel 将查询结果分页导出为 Excel 文件（.xlsx）。
 //
-// 内部使用 TableScan.Next 逐页读取，通过 excelize 的 StreamWriter 流式写入，
-// 内存占用始终只有一页数据量，适合百万级数据导出。
+// 使用 Next 逐页读取并通过 StreamWriter 流式写入，内存只占一页数据，适合大数据量。
+// 必须先配置排序字段（Asc/Desc），否则返回错误；排序字段须为可信列名。
 //
 // 参数：
-//   - ctx:    上下文，用于取消导出操作
-//   - db:     已应用 WHERE 条件的 GORM 查询
-//   - name:   导出文件名前缀（自动追加时间戳，如 "用户列表_20250618120000.xlsx"）
-//   - header: Excel 表头（如 []any{"ID", "姓名", "手机号", "创建时间"}）
-//   - cb:     行数据转换函数，入参为模型对象，出参为每列的值切片（顺序与 header 一致）
+//   - ctx:    取消导出
+//   - db:     已应用 WHERE 条件的查询
+//   - name:   文件名前缀，自动追加时间戳，如 "用户列表_20250618120000.xlsx"
+//   - header: 表头
+//   - cb:     行转换函数，返回值顺序与 header 一致；每个值通过 fmt.Sprint 转为文本单元格
 //
-// 返回值：
-//   - string: 生成的文件路径（位于系统临时目录，即 os.TempDir()）
-//   - error:  导出失败时返回错误
+// 返回生成的文件名（不含目录），文件位于 os.TempDir()。
 //
 // 使用示例：
 //
@@ -563,35 +363,31 @@ func (p *TableScan[T]) Prev(db *gorm.DB, first *T) ([]T, error) {
 //	if err != nil {
 //	    log.Fatalf("导出失败: %v", err)
 //	}
-//	fmt.Println("文件已生成:", filePath)
-//
-//	// 可选：移动文件到目标目录
-//	os.Rename(filePath, "/desired/path/users.xlsx")
+//	fmt.Println("文件已生成:", path.Join(os.TempDir(), filePath))
 func (p *TableScan[T]) ExportExcel(ctx context.Context, db *gorm.DB, name string, header []any, cb func(T) []any) (string, error) {
 	// 导出必须有稳定排序；否则每次 LIMIT 可能读取同一页，导致导出无法结束。
 	if len(p.orders) == 0 {
 		return "", fmt.Errorf("tablescan export requires at least one sort order")
 	}
-	// 创建 Excel 文件
 	excelFile := excelize.NewFile()
 	defer excelFile.Close()
 
-	// 创建流式写入器（StreamWriter），避免全量数据加载到内存
+	// 流式写入，避免全量数据进内存
 	streamWriter, err := excelFile.NewStreamWriter("Sheet1")
 	if err != nil {
 		return "", err
 	}
 
-	// 写入表头（A1 开始）
+	// 表头
 	if err := streamWriter.SetRow("A1", header); err != nil {
 		return "", err
 	}
 
-	// 逐页扫描并流式写入
+	// 逐页扫描并写入
 	index := 0
 	var last *T
 	for {
-		// 上下文取消时提前退出
+		// 响应取消
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
@@ -600,32 +396,28 @@ func (p *TableScan[T]) ExportExcel(ctx context.Context, db *gorm.DB, name string
 			return "", err
 		}
 		if len(values) == 0 {
-			break // 扫描完毕
+			break
 		}
-		// 逐行转换并写入
 		for i := 0; i < len(values); i++ {
 			row := cb(values[i])
 			d := make([]any, 0, len(row))
 			for _, v := range row {
 				d = append(d, excelize.Cell{StyleID: 49, Value: fmt.Sprint(v)})
 			}
-			// 计算单元格坐标：第 1 列，第 index+2 行（第 1 行是表头）
+			// 第 1 行是表头，数据从第 2 行开始
 			cell, _ := excelize.CoordinatesToCellName(1, index+2)
 			if err := streamWriter.SetRow(cell, d); err != nil {
 				return "", err
 			}
 			index++
 		}
-		// 游标指向本页最后一条
 		last = &values[len(values)-1]
 	}
 
-	// 刷新流式写入器，确保数据全部写入
 	if err := streamWriter.Flush(); err != nil {
 		return "", err
 	}
 
-	// 保存文件到临时目录
 	fileName := fmt.Sprintf("%v_%v.xlsx", name, time.Now().Format("20060102150405"))
 	if err := excelFile.SaveAs(path.Join(os.TempDir(), fileName)); err != nil {
 		return "", err
@@ -633,21 +425,11 @@ func (p *TableScan[T]) ExportExcel(ctx context.Context, db *gorm.DB, name string
 	return fileName, nil
 }
 
-// ExportCsv 将全表数据导出为 CSV 文件（.csv）。
+// ExportCsv 将查询结果分页导出为 CSV 文件（.csv）。
 //
-// 内部使用 TableScan.Next 逐页读取，通过 encoding/csv 流式写入，
-// 内存占用始终只有一页数据量，适合百万级数据导出。
-//
-// 参数：
-//   - ctx:    上下文，用于取消导出操作
-//   - db:     已应用 WHERE 条件的 GORM 查询
-//   - name:   导出文件名前缀（自动追加时间戳，如 "用户列表_20250618120000.csv"）
-//   - header: CSV 表头（如 []any{"ID", "姓名", "手机号", "创建时间"}）
-//   - cb:     行数据转换函数，入参为模型对象，出参为每列的值切片（顺序与 header 一致）
-//
-// 返回值：
-//   - string: 生成的文件路径（位于系统临时目录，即 os.TempDir()）
-//   - error:  导出失败时返回错误
+// 使用 Next 逐页读取并通过 encoding/csv 流式写入，内存只占一页数据，适合大数据量。
+// 必须先配置排序字段（Asc/Desc），否则返回错误；排序字段须为可信列名。
+// 参数含义同 ExportExcel；返回生成的文件名（不含目录），文件位于 os.TempDir()。
 //
 // 使用示例：
 //
@@ -679,7 +461,6 @@ func (p *TableScan[T]) ExportCsv(ctx context.Context, db *gorm.DB, name string, 
 
 	csvWriter := csv.NewWriter(file)
 
-	// 写入表头
 	headerRow := make([]string, 0, len(header))
 	for _, h := range header {
 		headerRow = append(headerRow, fmt.Sprint(h))
@@ -688,10 +469,10 @@ func (p *TableScan[T]) ExportCsv(ctx context.Context, db *gorm.DB, name string, 
 		return "", err
 	}
 
-	// 逐页扫描并流式写入
+	// 逐页扫描并写入
 	var last *T
 	for {
-		// 上下文取消时提前退出
+		// 响应取消
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
@@ -700,9 +481,8 @@ func (p *TableScan[T]) ExportCsv(ctx context.Context, db *gorm.DB, name string, 
 			return "", err
 		}
 		if len(values) == 0 {
-			break // 扫描完毕
+			break
 		}
-		// 逐行转换并写入
 		for i := 0; i < len(values); i++ {
 			row := cb(values[i])
 			rowStr := make([]string, 0, len(row))
@@ -713,11 +493,9 @@ func (p *TableScan[T]) ExportCsv(ctx context.Context, db *gorm.DB, name string, 
 				return "", err
 			}
 		}
-		// 游标指向本页最后一条
 		last = &values[len(values)-1]
 	}
 
-	// 刷新流式写入器，确保数据全部写入
 	csvWriter.Flush()
 	if err := csvWriter.Error(); err != nil {
 		return "", err

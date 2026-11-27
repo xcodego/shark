@@ -11,6 +11,7 @@ import (
 	"golang.org/x/tools/go/cfg"
 )
 
+// newKeyState 返回空的流分析状态。
 func newKeyState() *keyState {
 	return &keyState{
 		built: make(map[types.Object]bool), strings: make(map[types.Object]string),
@@ -18,6 +19,7 @@ func newKeyState() *keyState {
 	}
 }
 
+// clone 深拷贝状态；共享同一底层序列或 map 的变量在副本中仍共享同一份拷贝。
 func (s *keyState) clone() *keyState {
 	copy := newKeyState()
 	for obj, value := range s.built {
@@ -43,6 +45,7 @@ func (s *keyState) clone() *keyState {
 	return copy
 }
 
+// copySequence 深拷贝序列。
 func copySequence(sequence *rawSequence) *rawSequence {
 	copy := &rawSequence{length: sequence.length, prefix: sequence.prefix, cap: sequence.cap, origin: sequence.origin, tail: sequence.tail, values: make(map[int]rawArgument)}
 	for index, arg := range sequence.values {
@@ -51,6 +54,7 @@ func copySequence(sequence *rawSequence) *rawSequence {
 	return copy
 }
 
+// joinArgument 合并两个分支上的参数：任一分支 built 即 built，文本不一致则丢弃文本。
 func joinArgument(a, b rawArgument) rawArgument {
 	joined := rawArgument{built: a.built || b.built}
 	if a.text == b.text {
@@ -59,6 +63,8 @@ func joinArgument(a, b rawArgument) rawArgument {
 	return joined
 }
 
+// joinSequence 合并两个分支上的序列；长度不一致时长度置为未知，
+// 超出公共前缀的元素汇总到 tail。a 或 b 为 nil 表示该分支没有此序列。
 func joinSequence(a, b *rawSequence) *rawSequence {
 	if a == nil {
 		return copySequence(b)
@@ -105,6 +111,7 @@ func joinSequence(a, b *rawSequence) *rawSequence {
 	return out
 }
 
+// joinStates 在控制流汇合点合并两个状态，保守地保留任一分支的 built 标记。
 func joinStates(a, b *keyState) *keyState {
 	out := newKeyState()
 	for obj, value := range a.built {
@@ -158,6 +165,7 @@ func joinStates(a, b *keyState) *keyState {
 	return out
 }
 
+// refresh 根据序列和 map 的内容重新计算对应变量的 built 标记。
 func (s *keyState) refresh() {
 	for obj, seq := range s.sequences {
 		built := seq.tail.built
@@ -171,6 +179,9 @@ func (s *keyState) refresh() {
 	}
 }
 
+// checkKeys 对 file 中每个函数体和函数字面量做基于控制流图的前向数据流分析，
+// 报告把直接字符串或构造字符串用作 Redis key 的调用。
+// 状态在 CFG 汇合处合并，迭代到不动点；带豁免注释的调用不报告。
 func checkKeys(file *ast.File, fset *token.FileSet, info *types.Info) []error {
 	violations := make(map[token.Pos]Violation)
 	ast.Inspect(file, func(node ast.Node) bool {
@@ -239,6 +250,7 @@ func checkKeys(file *ast.File, fset *token.FileSet, info *types.Info) []error {
 	return errs
 }
 
+// rangeValues 处理 range 循环变量：元素（切片/数组）或 map key 继承被遍历对象的 built 状态。
 func (s *keyState) rangeValues(stmt *ast.RangeStmt, info *types.Info) {
 	t := info.TypeOf(stmt.X)
 	if t == nil {
@@ -265,6 +277,7 @@ func (s *keyState) rangeValues(stmt *ast.RangeStmt, info *types.Info) {
 	}
 }
 
+// transfer 是单条语句的状态转移函数，处理赋值（含 += 与下标赋值）和变量声明。
 func (s *keyState) transfer(node ast.Node, info *types.Info) {
 	switch n := node.(type) {
 	case *ast.AssignStmt:

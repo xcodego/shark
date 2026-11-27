@@ -1,11 +1,4 @@
-/*
-	AI 代码审查
-	请重点检查逻辑错误、潜在 Bug、边界条件、并发安全及资源泄漏等实质性问题。
-	不要过度审查，不要吹毛求疵，不要纠结代码风格、命名或个人编码习惯，也不要提出无关的重构和优化建议。
-	只报告有明确依据、可能导致实际故障的问题，并说明原因和触发条件。
-	如果没有发现明显问题，直接说明：未发现明显问题。
-*/
-// Package sharklog 提供输出到控制台和 Kafka 的 zap 日志器。
+// Package sharklog 提供同时输出到控制台和 Kafka 的 zap 日志器。
 package sharklog
 
 import (
@@ -43,7 +36,7 @@ func New(ctx context.Context, name string, id string) *SharkLog {
 		hostName = "unknown"
 	}
 
-	snowFlake := sharksnowflake.NewSnowflake()
+	snowFlake := sharksnowflake.New()
 
 	lwriter := &logWriter{
 		ctx:       ctx,
@@ -66,11 +59,12 @@ func New(ctx context.Context, name string, id string) *SharkLog {
 
 // SharkLog 包装 zap.Logger，并支持将日志推送到 Kafka。
 type SharkLog struct {
+	// Zap 日志器，同时写入控制台和（设置 Writer 后的）Kafka。
 	Zap    *zap.Logger
 	writer *logWriter
 }
 
-// SetKafkaWriter 设置 Kafka Writer，启用远程日志推送。
+// SetKafkaWriter 设置 Kafka Writer，启用远程日志推送；已设置过则忽略。
 func (s *SharkLog) SetKafkaWriter(writer *kafka.Writer) {
 	s.writer.locker.Lock()
 	defer s.writer.locker.Unlock()
@@ -80,7 +74,7 @@ func (s *SharkLog) SetKafkaWriter(writer *kafka.Writer) {
 	s.writer.writer = writer
 }
 
-// Close 关闭,业务确保所有日志都写入了,再关闭
+// Close 关闭 Kafka Writer，调用前应确保业务日志已全部写出；之后日志只输出到控制台。
 func (s *SharkLog) Close() {
 	s.writer.locker.Lock()
 	defer s.writer.locker.Unlock()
@@ -91,6 +85,7 @@ func (s *SharkLog) Close() {
 	s.writer.writer = nil
 }
 
+// logWriter 是 zap 的 Kafka 输出端，把每条 JSON 日志包装后写入 Kafka；Writer 为空时丢弃。
 type logWriter struct {
 	ctx       context.Context
 	writer    *kafka.Writer
@@ -101,7 +96,8 @@ type logWriter struct {
 	locker    sync.Mutex
 }
 
-// Write 将日志写入 Kafka；未配置 Writer 时忽略，写入失败时返回错误给 zap。
+// Write 将一条日志包装（附 log_id、服务实例名、主机名）后写入 Kafka。
+// 未配置 Writer 时直接忽略；写入失败时返回错误给 zap。
 func (w *logWriter) Write(p []byte) (n int, err error) {
 	w.locker.Lock()
 	defer w.locker.Unlock()

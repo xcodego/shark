@@ -10,6 +10,7 @@ import (
 	sharklint_redis "github.com/xcodego/shark/sharklint/redis"
 )
 
+// TestKeyConstruction 验证 go-redis 方法参数中直接字面量或构造字符串作为 key 的识别。
 func TestKeyConstruction(t *testing.T) {
 	dir := fixture(t)
 	writeFile(t, filepath.Join(dir, "redis", "redis.go"), `package redis
@@ -93,6 +94,7 @@ func run(ctx context.Context, c *r.Client, safe string) {
 	checkKeyDiagnostics(t, dir, source)
 }
 
+// checkKeyDiagnostics 检查 dir 的 key 诊断：带“// want”的行必须被报告，其余行不得被报告。
 func checkKeyDiagnostics(t *testing.T, dir, source string) {
 	t.Helper()
 	err := sharklint_redis.Lint(dir)
@@ -116,6 +118,7 @@ func checkKeyDiagnostics(t *testing.T, dir, source string) {
 	}
 }
 
+// TestRedigoAndRueidisKeys 验证 redigo 与 rueidis 的 key 识别。
 func TestRedigoAndRueidisKeys(t *testing.T) {
 	tests := []struct {
 		name, module, version, client, source string
@@ -213,6 +216,7 @@ func run(b r.Builder, safe string) {
 	}
 }
 
+// TestRealRedisKeys 用真实 go-redis 类型的 testdata 验证 key 识别。
 func TestRealRedisKeys(t *testing.T) {
 	path := filepath.Join("testdata", "realkeys", "main.go")
 	source, err := os.ReadFile(path)

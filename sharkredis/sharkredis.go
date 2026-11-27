@@ -1,6 +1,5 @@
-// Package sharkredis 创建并管理集群或单机 Redis 客户端。
-// Config 支持连接池、超时、重试及可选地址替换；创建客户端时会执行 Ping 健康检查。
-// Helper 还封装了常用对象存取、批量扫描和删除操作。
+// Package sharkredis 提供 Redis 单机/集群客户端构造（NewClient、NewCluster）、
+// 统一两种客户端的操作封装（Helper）和基于 redsync 的分布式锁（SharkMutex）。
 package sharkredis
 
 import (
@@ -13,127 +12,61 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Config 是 Redis 的连接配置，统一管理集群和单机两种模式的连接参数。
-//
-// # 模式选择
-//
-// Host 字段的长度决定了客户端模式：
-//   - 集群模式（NewCluster）：Host 应包含所有集群节点的地址（如 "node1:6379", "node2:6379"），
-//     go-redis 会自动发现集群拓扑。
-//   - 单机模式（NewClient）：Host[0] 作为直连地址，其余元素会被忽略。
-//
-// # 连接池参数
-//
-// PoolSize 和 MinIdleConns 为零值时分别采用默认值 200 和 20，以保持向后兼容。
-// 在高并发场景下建议根据 QPS 调整 PoolSize；低负载场景可适当调低 MinIdleConns 节省资源。
-//
-// # 地址替换（Kubernetes 场景）
-//
-// ReplaceFrom / ReplaceTo 用于解决容器化环境中 Redis Cluster 返回的内部 Service IP
-// 无法从外部访问的问题。例如：
-//
-//	ReplaceFrom: "redis-cluster-headless.namespace.svc.cluster.local"
-//	ReplaceTo:   "10.0.1.x"  // 实际的 Pod IP
-//
-// 当自定义 Dialer 收到连接请求时，会自动将地址中的 ReplaceFrom 替换为 ReplaceTo。
-// 注意：仅 ReplaceFrom 和 ReplaceTo 均非空时才启用替换逻辑。
-//
-// # 序列化支持
-//
-// 结构体同时标注了 json、yaml、mapstructure 三种 tag，可从以下配置源直接反序列化：
-//   - 标准 JSON 文件或 API 响应
-//   - YAML 配置文件
-//   - viper / mapstructure 配置管理
+// Config 配置 Redis 客户端。NewCluster 使用全部 Host 地址，NewClient 只使用 Host[0]；
+// PoolSize 和 MinIdleConns 为零时分别默认为 200 和 20。用户名固定为 "default"。
 type Config struct {
-	// Host Redis 节点地址列表，格式为 "host:port"。
-	// 集群模式传所有节点，单机模式传单个地址。
+	// Host 是 Redis 节点地址，格式为 host:port。
 	Host []string `json:"host" yaml:"host" mapstructure:"host"`
-	// Password 连接密码，为空字符串时不使用 AUTH 认证。
+	// Password 是 Redis 密码。
 	Password string `json:"password" yaml:"password" mapstructure:"password"`
-	// ReplaceFrom 需要被替换的地址前缀（如 Kubernetes Service 域名）。
-	// 仅当 ReplaceFrom 和 ReplaceTo 均非空时，自定义 Dialer 才会执行替换。
+	// ReplaceFrom 是连接集群节点时要替换的地址子串（strings.ReplaceAll），用于把集群返回的内网地址映射为可达地址；
+	// 仅 NewCluster 使用，且需 ReplaceTo 也非空才生效。
 	ReplaceFrom string `json:"replace_from" yaml:"replace_from" mapstructure:"replace_from"`
-	// ReplaceTo 替换目标地址（如具体的 Pod IP）。
+	// ReplaceTo 是替换后的内容。
 	ReplaceTo string `json:"replace_to" yaml:"replace_to" mapstructure:"replace_to"`
-	// PoolSize 连接池最大连接数，0 时使用默认值 200。
-	// 该值对每个集群节点分别生效（集群模式下是 per-node 的）。
+	// PoolSize 是每个节点的最大连接数，0 时默认为 200。
 	PoolSize int `json:"pool_size" yaml:"pool_size" mapstructure:"pool_size"`
-	// MinIdleConns 连接池最小空闲连接数，0 时使用默认值 20。
-	// 适当设置可减少冷连接建立延迟，但过多空闲连接会占用 Redis 服务端文件描述符。
+	// MinIdleConns 是最小空闲连接数，0 时默认为 20。
 	MinIdleConns int `json:"min_idle_conns" yaml:"min_idle_conns" mapstructure:"min_idle_conns"`
 }
 
-// NewCluster 创建 Redis 集群模式客户端并验证连接。
-//
-// 连接池配置:
-//   - PoolSize: 200（最大连接数）
-//   - MinIdleConns: 20（最小空闲连接数）
-//   - ConnMaxIdleTime: 10 分钟
-//   - ConnMaxLifetime: 30 分钟
-//   - 读写/连接超时: 2 秒
-//   - 重试: 最多 2 次，退避间隔 100ms~1s
-//
-// 使用示例:
-//
-//	cluster, err := sharkredis.NewCluster(ctx, &sharkredis.Config{
-//	    Host:     []string{"127.0.0.1:6379", "127.0.0.1:6380"},
-//	    Password: "myPassword",
-//	})
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	defer cluster.Close()
-//
-//	// 使用集群客户端
-//	cluster.Set(ctx, "mykey", "myvalue", 0)
-//	val, _ := cluster.Get(ctx, "mykey").Result()
+// NewCluster 创建集群客户端并通过 PING 检查连接；config 为 nil 返回错误。
 func NewCluster(ctx context.Context, config *Config) (*redis.ClusterClient, error) {
-	// 防御性检查：Config 不能为 nil
 	if config == nil {
 		return nil, fmt.Errorf("config required")
 	}
 
-	// ---------- 连接池参数：零值兜底为默认值 ----------
-	// 最小空闲连接数默认 20，维持一定量的热连接以降低请求延迟。
 	minIdle := 20
 	if config.MinIdleConns > 0 {
 		minIdle = config.MinIdleConns
 	}
-	// 每个节点的连接池上限默认 200。
 	poolSize := 200
 	if config.PoolSize > 0 {
 		poolSize = config.PoolSize
 	}
 
-	// ---------- 构建集群客户端 ----------
 	client := redis.NewClusterClient(&redis.ClusterOptions{
-		Addrs:    config.Host, // 集群所有节点地址，go-redis 会自动完成 CLUSTER SLOTS 发现
-		Username: "default",   // Redis 6+ ACL 用户名，低版本 Redis 使用 "default"
+		Addrs:    config.Host,
+		Username: "default",
 		Password: config.Password,
 
-		// --- 重试策略 ---
-		MaxRetries:      2,                      // 命令失败后最多重试 2 次，防止雪崩
-		MinRetryBackoff: 100 * time.Millisecond, // 重试最小退避间隔（首次重试）
-		MaxRetryBackoff: time.Second,            // 重试最大退避间隔（指数退避上限）
+		MaxRetries:      2,
+		MinRetryBackoff: 100 * time.Millisecond,
+		MaxRetryBackoff: time.Second,
 
-		// --- 连接池 ---
-		MinIdleConns:    minIdle,          // 维持的最小空闲连接数
-		PoolSize:        poolSize,         // 每个节点的最大连接数
-		ConnMaxIdleTime: 10 * time.Minute, // 空闲连接超过此时间将被关闭
-		ConnMaxLifetime: 30 * time.Minute, // 连接最长存活时间（到达后主动关闭重建）
+		MinIdleConns:    minIdle,
+		PoolSize:        poolSize,
+		ConnMaxIdleTime: 10 * time.Minute,
+		ConnMaxLifetime: 30 * time.Minute,
 
-		// --- 超时 ---
-		DialTimeout:  2 * time.Second, // TCP 连接建立超时
-		ReadTimeout:  2 * time.Second, // Socket 读取超时（包含网络往返）
-		WriteTimeout: 2 * time.Second, // Socket 写入超时
+		DialTimeout:  2 * time.Second,
+		ReadTimeout:  2 * time.Second,
+		WriteTimeout: 2 * time.Second,
 
-		// NewClient 回调：go-redis 在集群模式下用此函数创建到单节点的底层连接。
 		NewClient: func(opt *redis.Options) *redis.Client {
 			return redis.NewClient(opt)
 		},
 
-		// 自定义 Dialer：在建立 TCP 连接前，可替换目标地址。
-		// 典型场景：Kubernetes 中将 Headless Service 域名替换为 Pod IP。
 		Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			if config.ReplaceFrom != "" && config.ReplaceTo != "" {
 				addr = strings.ReplaceAll(addr, config.ReplaceFrom, config.ReplaceTo)
@@ -142,7 +75,6 @@ func NewCluster(ctx context.Context, config *Config) (*redis.ClusterClient, erro
 		},
 	})
 
-	// 连接健康检查：执行 PING 验证所有节点可达
 	_, err := client.Ping(ctx).Result()
 	if err != nil {
 		return nil, err
@@ -150,25 +82,8 @@ func NewCluster(ctx context.Context, config *Config) (*redis.ClusterClient, erro
 	return client, nil
 }
 
-// NewClient 创建 Redis 单机/主从模式客户端并验证连接。
-//
-// 使用 config.Host[0] 作为连接地址，连接池参数与 NewCluster 一致。
-//
-// 使用示例:
-//
-//	client, err := sharkredis.NewClient(ctx, &sharkredis.Config{
-//	    Host:     []string{"127.0.0.1:6379"},
-//	    Password: "myPassword",
-//	})
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	defer client.Close()
-//
-//	// 使用单机客户端
-//	client.Set(ctx, "mykey", "myvalue", 10*time.Second)
+// NewClient 创建单机客户端，使用 Host[0] 并通过 PING 检查连接；config 为 nil 或 Host 为空返回错误。
 func NewClient(ctx context.Context, config *Config) (*redis.Client, error) {
-	// 防御性检查
 	if config == nil {
 		return nil, fmt.Errorf("config required")
 	}
@@ -176,43 +91,34 @@ func NewClient(ctx context.Context, config *Config) (*redis.Client, error) {
 		return nil, fmt.Errorf("at least one host required")
 	}
 
-	// ---------- 连接池参数：零值兜底为默认值 ----------
-	// 最小空闲连接数默认 20。
 	minIdle := 20
 	if config.MinIdleConns > 0 {
 		minIdle = config.MinIdleConns
 	}
-	// 连接池上限默认 200。
 	poolSize := 200
 	if config.PoolSize > 0 {
 		poolSize = config.PoolSize
 	}
 
-	// ---------- 构建单机/主从客户端 ----------
-	// 注意：go-redis 的 Options 直接传入 Addr，支持主从读写分离需通过 NewFailoverClient。
 	client := redis.NewClient(&redis.Options{
-		Addr:     config.Host[0], // 仅使用第一个地址作为直连目标
-		Username: "default",      // Redis 6+ ACL 用户名
+		Addr:     config.Host[0],
+		Username: "default",
 		Password: config.Password,
 
-		// --- 重试策略 ---
-		MaxRetries:      2,                      // 命令失败后最多重试 2 次
-		MinRetryBackoff: 100 * time.Millisecond, // 重试最小退避间隔
-		MaxRetryBackoff: time.Second,            // 重试最大退避间隔（指数退避上限）
+		MaxRetries:      2,
+		MinRetryBackoff: 100 * time.Millisecond,
+		MaxRetryBackoff: time.Second,
 
-		// --- 连接池 ---
-		MinIdleConns:    minIdle,          // 维持的最小空闲连接数
-		PoolSize:        poolSize,         // 连接池最大连接数
-		ConnMaxIdleTime: 10 * time.Minute, // 空闲连接最大存活时间
-		ConnMaxLifetime: 30 * time.Minute, // 连接最长存活时间（到达后主动关闭并重建）
+		MinIdleConns:    minIdle,
+		PoolSize:        poolSize,
+		ConnMaxIdleTime: 10 * time.Minute,
+		ConnMaxLifetime: 30 * time.Minute,
 
-		// --- 超时 ---
-		DialTimeout:  2 * time.Second, // TCP 连接建立超时
-		ReadTimeout:  2 * time.Second, // Socket 读取超时
-		WriteTimeout: 2 * time.Second, // Socket 写入超时
+		DialTimeout:  2 * time.Second,
+		ReadTimeout:  2 * time.Second,
+		WriteTimeout: 2 * time.Second,
 	})
 
-	// 连接健康检查
 	_, err := client.Ping(ctx).Result()
 	if err != nil {
 		return nil, err

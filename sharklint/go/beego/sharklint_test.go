@@ -10,6 +10,7 @@ import (
 	"github.com/xcodego/shark/sharklint/go/beego"
 )
 
+// writeFile 创建 path 的父目录并写入 content, 供测试构造源码文件。
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -20,6 +21,7 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// TestLintBansBeegoImports 验证 Beego 导入被报告, 测试文件除外。
 func TestLintBansBeegoImports(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "main.go"), `package main
@@ -57,6 +59,7 @@ import "github.com/beego/beego/v2"
 	}
 }
 
+// TestLintCleanAndErrors 验证 Beego CLI 包不误报, 以及各类错误的报告。
 func TestLintCleanAndErrors(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "main.go"), `package main

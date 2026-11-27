@@ -14,19 +14,23 @@ import (
 	"strings"
 )
 
+// forceIgnorePattern 匹配 "force ignore sharklint: any" 豁免标记。
 var forceIgnorePattern = regexp.MustCompile(`force[ \t]+ignore[ \t]+sharklint[ \t]*:[ \t]*any\b`)
 
 // Violation 表示一处使用 interface{} 的违规位置。
 type Violation struct {
+	// Position 是 interface 关键字所在位置。
 	Position token.Position
 }
 
+// Error 返回带位置信息的违规描述。
 func (v Violation) Error() string {
 	return fmt.Sprintf("%s: 禁止使用 interface{}，请使用 any", v.Position)
 }
 
 // Lint 递归检查 dir 中所有非测试 .go 文件，包括被构建标签排除的文件。
 // 检查不会跟随符号链接，返回所有发现的违规及文件系统或语法错误。
+// 方法集为空的 interface 类型字面量视为违规, 可在上一行用 force ignore 注释豁免。
 func Lint(dir string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
@@ -71,6 +75,7 @@ func Lint(dir string) error {
 	return errors.Join(errs...)
 }
 
+// hasForceIgnoreComment 判断空接口所在行的上一行是否以豁免注释结尾。
 func hasForceIgnoreComment(file *ast.File, fset *token.FileSet, typeLine int) bool {
 	for _, group := range file.Comments {
 		if fset.PositionFor(group.End(), false).Line == typeLine-1 &&

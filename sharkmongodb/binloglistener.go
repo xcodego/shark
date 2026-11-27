@@ -1,3 +1,5 @@
+// binloglistener.go 基于 MongoDB Change Stream 实现类似 binlog 的数据变更监听。
+
 package sharkmongodb
 
 import (
@@ -14,16 +16,19 @@ import (
 	"go.uber.org/zap"
 )
 
+// BinlogConfig 是 BinlogListener 的配置，除 User、Password 外均为必填。
 type BinlogConfig struct {
-	Addr     string
-	User     string
-	Password string
-	Logger   *zap.Logger
-	Redis    *redis.ClusterClient
-	PosKey   string
-	Database string
+	Addr     string               // MongoDB 地址，格式为 host:port
+	User     string               // 用户名
+	Password string               // 密码
+	Logger   *zap.Logger          // 日志
+	Redis    *redis.ClusterClient // 保存 resume token 的 Redis
+	PosKey   string               // resume token 在 Redis 中的 key
+	Database string               // 监听的数据库，覆盖其下所有集合
 }
 
+// BinlogListener 监听整个数据库的 Change Stream，并把增删改事件分发给回调。
+// resume token 持久化在 Redis 中，重启后从上次处理到的位置继续（至少一次，回调需幂等）。
 type BinlogListener struct {
 	config   *BinlogConfig
 	onInsert func(table string, data map[string]any)
@@ -33,12 +38,14 @@ type BinlogListener struct {
 	cancel   context.CancelFunc
 }
 
+// NewBinlogListener 创建监听器，配置校验推迟到 Start。
 func NewBinlogListener(config *BinlogConfig) *BinlogListener {
 	return &BinlogListener{
 		config: config,
 	}
 }
 
+// changeEvent 是 Change Stream 事件中用到的字段。
 type changeEvent struct {
 	ID            bson.Raw `bson:"_id"`
 	OperationType string   `bson:"operationType"`
@@ -50,9 +57,10 @@ type changeEvent struct {
 	FullDocumentBeforeChange map[string]any `bson:"fullDocumentBeforeChange"`
 }
 
-// Start 从 Redis 中保存的 resume token 开始监听数据库的 Change Stream，直到 Stop 被调用或发生错误。
-// 首次启动时先保存当前 resume token，再开始监听；不会导出已有数据。
-// 需要副本集或分片集群。delete 的完整文档需集合开启 changeStreamPreAndPostImages，否则仅包含 documentKey。
+// Start 阻塞监听 Change Stream，直到出错或 Stop/ctx 取消；同一监听器同时只能运行一个 Start。
+// 从 Redis 保存的 resume token 继续；首次启动从当前位置开始，不导出旧数据。
+// 事件的回调同步执行，回调返回后才保存位置。
+// 需要副本集或分片集群；delete 事件的完整文档需启用 changeStreamPreAndPostImages，否则回调只收到 documentKey。
 func (l *BinlogListener) Start() error {
 	if l.config == nil || strings.TrimSpace(l.config.Addr) == "" || l.config.Logger == nil || l.config.Redis == nil ||
 		strings.TrimSpace(l.config.PosKey) == "" || strings.TrimSpace(l.config.Database) == "" {
@@ -74,6 +82,7 @@ func (l *BinlogListener) Start() error {
 		l.mu.Unlock()
 	}()
 
+	// 没有已保存位置（redis.Nil）时 token 为空，后面从当前位置开始
 	value, err := l.config.Redis.Get(ctx, l.config.PosKey).Result()
 	var token bson.Raw
 	switch {
@@ -105,6 +114,7 @@ func (l *BinlogListener) Start() error {
 	}
 	defer cs.Close(context.Background())
 
+	// 首次启动立即保存当前位置，避免没有事件时重启丢失启动之后的变更
 	if token == nil {
 		if token = cs.ResumeToken(); len(token) == 0 {
 			return errors.New("binlog: invalid current position")
@@ -136,6 +146,8 @@ func (l *BinlogListener) Start() error {
 	return nil
 }
 
+// dispatch 按操作类型调用对应回调。update/replace 事件缺少完整文档时返回错误，
+// delete 事件优先使用变更前文档，否则退化为 documentKey。
 func (l *BinlogListener) dispatch(e *changeEvent) error {
 	l.mu.Lock()
 	onInsert, onUpdate, onDelete := l.onInsert, l.onUpdate, l.onDelete
@@ -164,6 +176,7 @@ func (l *BinlogListener) dispatch(e *changeEvent) error {
 	return nil
 }
 
+// savePosition 将 resume token 保存到 Redis（不过期）。
 func (l *BinlogListener) savePosition(ctx context.Context, token bson.Raw) error {
 	if len(token) == 0 {
 		return errors.New("binlog: invalid position to save")
@@ -174,7 +187,7 @@ func (l *BinlogListener) savePosition(ctx context.Context, token bson.Raw) error
 	return nil
 }
 
-// Stop 请求停止监听；Start 返回后监听才算完全停止。
+// Stop 请求停止监听，Start 随后返回 context.Canceled；未运行时无操作。
 func (l *BinlogListener) Stop() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -183,7 +196,7 @@ func (l *BinlogListener) Stop() {
 	}
 }
 
-// OnInsert 注册插入事件回调。
+// OnInsert 注册插入事件回调，table 为集合名；返回自身以便链式调用。
 func (l *BinlogListener) OnInsert(fn func(table string, data map[string]any)) *BinlogListener {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -191,8 +204,7 @@ func (l *BinlogListener) OnInsert(fn func(table string, data map[string]any)) *B
 	return l
 }
 
-// OnUpdate 注册更新事件回调，data 为修改后的完整文档。
-// 对于 update，MongoDB 的 UpdateLookup 可能返回后续修改后的文档；若文档已删除则监听返回错误。
+// OnUpdate 注册 update 与 replace 事件回调；data 为 UpdateLookup 得到的最新完整文档，缺失时 Start 返回错误。
 func (l *BinlogListener) OnUpdate(fn func(table string, data map[string]any)) *BinlogListener {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -200,7 +212,7 @@ func (l *BinlogListener) OnUpdate(fn func(table string, data map[string]any)) *B
 	return l
 }
 
-// OnDelete 注册删除事件回调。
+// OnDelete 注册删除事件回调；data 为变更前文档，未启用前后镜像时为 documentKey。
 func (l *BinlogListener) OnDelete(fn func(table string, data map[string]any)) *BinlogListener {
 	l.mu.Lock()
 	defer l.mu.Unlock()

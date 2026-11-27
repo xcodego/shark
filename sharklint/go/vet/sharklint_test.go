@@ -10,6 +10,7 @@ import (
 	"github.com/xcodego/shark/sharklint/go/vet"
 )
 
+// writeFile 创建 path 的父目录并写入 content, 供测试构造源码文件。
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -20,6 +21,7 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// TestLint 验证 go vet 诊断被报告且可定位到文件。
 func TestLint(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "go.mod"), "module example.com/project\n\ngo 1.26\n")
@@ -36,6 +38,7 @@ func main() { fmt.Printf("%d", "not a number") }
 	}
 }
 
+// TestLintCleanAndErrors 验证无问题、无 Go 文件及各类错误的处理。
 func TestLintCleanAndErrors(t *testing.T) {
 	if err := vet.Lint(t.TempDir()); err != nil {
 		t.Fatalf("空目录不应报错，实际得到 %v", err)

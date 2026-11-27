@@ -9,6 +9,7 @@ import (
 	sharklint_redis "github.com/xcodego/shark/sharklint/redis"
 )
 
+// TestForbiddenCommands 验证 Do 调用中各禁用命令及 CLIENT KILL/PAUSE 子命令的识别。
 func TestForbiddenCommands(t *testing.T) {
 	dir := fixture(t)
 	commands := []string{
@@ -63,6 +64,7 @@ c.Do(ctx, []any{1: key, 0: "GET"}...)
 	}
 }
 
+// TestRealRedisMethods 用真实 go-redis 类型的 testdata 验证具名禁用方法的识别（SentinelClient.Monitor 除外）。
 func TestRealRedisMethods(t *testing.T) {
 	err := sharklint_redis.Lint(filepath.Join("testdata", "realcommands"))
 	if err == nil || strings.Contains(err.Error(), "加载 Go 包失败") {
@@ -84,6 +86,7 @@ func TestRealRedisMethods(t *testing.T) {
 	}
 }
 
+// TestRawForbiddenCommands 验证 DoRaw/DoRawWriteTo 等原始命令入口的识别。
 func TestRawForbiddenCommands(t *testing.T) {
 	dir := fixture(t)
 	writeFile(t, filepath.Join(dir, "redis", "redis.go"), `package redis
@@ -120,6 +123,7 @@ func run(ctx context.Context, c *r.Client, w io.Writer, key string) {
 	}
 }
 
+// TestRueidisBuilderCommands 验证 rueidis Builder 具名方法的禁用命令识别。
 func TestRueidisBuilderCommands(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "go.mod"), "module example.com/app\n\ngo 1.26\n\nrequire github.com/redis/rueidis v1.0.0\nreplace github.com/redis/rueidis => ./client\n")

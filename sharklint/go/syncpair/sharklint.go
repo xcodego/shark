@@ -1,4 +1,5 @@
-// Package syncpair 检查同步操作的配对。
+// Package syncpair 检查 sync.Mutex、sync.RWMutex 的加解锁，以及函数内局部 sync.WaitGroup 的
+// Add/Done 是否配对，并报告存在未释放退出路径、重复加锁或多余释放的位置。
 package syncpair
 
 import (
@@ -18,17 +19,22 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
+// ignorePattern 匹配 "force ignore sharklint: syncpair" 豁免标记。
 var ignorePattern = regexp.MustCompile(`force[ \t]+ignore[ \t]+sharklint[ \t]*:[ \t]*syncpair\b`)
 
 // Violation 表示一处可能不配对的同步操作。
 type Violation struct {
+	// Position 是问题操作（通常是未释放的加锁或 Add）的位置。
 	Position token.Position
-	Message  string
+	// Message 描述具体问题。
+	Message string
 }
 
+// Error 返回带位置信息的违规描述。
 func (v Violation) Error() string { return fmt.Sprintf("%s: %s", v.Position, v.Message) }
 
-// Lint 检查当前构建条件下的非测试 Go 包。
+// Lint 加载 dir 下当前构建条件中的非测试 Go 包, 对每个函数体和函数字面量做配对检查。
+// 可在问题所在行的上一行用 force ignore 注释豁免; dir 下没有非测试 .go 文件时跳过。
 func Lint(dir string) error {
 	stat, err := os.Lstat(dir)
 	if err != nil {
@@ -74,6 +80,7 @@ func Lint(dir string) error {
 			if strings.HasSuffix(pkg.Fset.PositionFor(file.Pos(), false).Filename, "_test.go") {
 				continue
 			}
+			// 同一位置同一消息只报告一次（多条路径可能触发相同问题）。
 			reported := make(map[string]bool)
 			report := func(pos token.Pos, message string) {
 				position := pkg.Fset.PositionFor(pos, false)
@@ -100,6 +107,7 @@ func Lint(dir string) error {
 	return errors.Join(errs...)
 }
 
+// ignored 判断 line 的上一行是否以豁免注释结尾。
 func ignored(file *ast.File, fset *token.FileSet, line int) bool {
 	for _, group := range file.Comments {
 		if fset.PositionFor(group.End(), false).Line == line-1 && ignorePattern.MatchString(group.Text()) {
@@ -109,13 +117,16 @@ func ignored(file *ast.File, fset *token.FileSet, line int) bool {
 	return false
 }
 
+// object 表示一个被跟踪的同步对象及其操作类别。
 type object struct {
-	key  string
-	root types.Object
-	kind string
-	mode string
+	key  string       // 对象（含字段路径）的标识
+	root types.Object // 路径最左侧的变量
+	kind string       // Mutex、RWMutex 或 WaitGroup
+	mode string       // 锁的方向: read 或 write; WaitGroup 为空
 }
 
+// objectKey 为由标识符、字段选择、解引用和取地址组成的表达式生成稳定标识, 并返回最左侧的变量;
+// 无法定位到变量时返回空值。
 func objectKey(expr ast.Expr, info *types.Info) (string, types.Object) {
 	switch e := ast.Unparen(expr).(type) {
 	case *ast.Ident:
@@ -138,6 +149,8 @@ func objectKey(expr ast.Expr, info *types.Info) (string, types.Object) {
 	return "", nil
 }
 
+// method 在 call 是 sync.Mutex/RWMutex/WaitGroup 的方法调用时, 返回接收者对象及方法名;
+// 否则返回零值和空串。
 func method(call *ast.CallExpr, info *types.Info) (object, string) {
 	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
 	if !ok || info.Selections[sel] == nil || info.Selections[sel].Kind() != types.MethodVal {
@@ -167,6 +180,7 @@ func method(call *ast.CallExpr, info *types.Info) (object, string) {
 	return object{key: key, root: root, kind: kind}, fn.Name()
 }
 
+// inspectBody 遍历 body 但不进入嵌套的函数字面量（它们由 Lint 单独检查）。
 func inspectBody(body *ast.BlockStmt, visit func(ast.Node)) {
 	ast.Inspect(body, func(n ast.Node) bool {
 		if n == nil {
@@ -180,6 +194,7 @@ func inspectBody(body *ast.BlockStmt, visit func(ast.Node)) {
 	})
 }
 
+// graph 构建 body 的控制流图; 内置 panic 调用视为不会返回, 其后的路径不计入退出路径。
 func graph(body *ast.BlockStmt, info *types.Info) *cfg.CFG {
 	return cfg.New(body, func(call *ast.CallExpr) bool {
 		id, ok := ast.Unparen(call.Fun).(*ast.Ident)
@@ -187,6 +202,7 @@ func graph(body *ast.BlockStmt, info *types.Info) *cfg.CFG {
 	})
 }
 
+// checkBody 先收集 body 内出现过的锁/WaitGroup 对象, 再对每个对象沿控制流图逐条路径检查配对。
 func checkBody(body *ast.BlockStmt, info *types.Info, report func(token.Pos, string)) {
 	objects := make(map[string]object)
 	acquired := make(map[string]bool)
@@ -242,8 +258,8 @@ func checkBody(body *ast.BlockStmt, info *types.Info, report func(token.Pos, str
 			continue
 		}
 		if obj.kind == "WaitGroup" {
-			// A WaitGroup passed into a function or stored in a field may be
-			// completed by a different function, which is not analyzed here.
+			// 非局部变量、字段、或逃逸（传入其他函数等）的 WaitGroup 可能由别的函数完成,
+			// 这里无法分析, 跳过。
 			if obj.root.Pos() < body.Pos() || obj.root.Pos() >= body.End() || strings.Contains(obj.key, "/") ||
 				waitGroupEscapes(body, obj, info) {
 				continue
@@ -254,18 +270,23 @@ func checkBody(body *ast.BlockStmt, info *types.Info, report func(token.Pos, str
 	}
 }
 
+// limit 限制计数的上限, 保证循环中状态空间有限、分析能够收敛。
 const limit = 64
 
+// state 是沿某条路径到达某点时的配对状态。
 type state struct {
-	count, deferred int
-	origin          token.Pos
+	count, deferred int       // 尚未释放的次数 / 已登记的延迟释放次数
+	origin          token.Pos // 最早未释放的加锁或 Add 的位置, 用于报告
 }
 
+// work 是控制流图遍历的工作项: 以 state 进入 block。
 type work struct {
 	block *cfg.Block
 	state state
 }
 
+// analyze 沿控制流图遍历 obj 的所有路径, 在退出点报告未释放或多余的延迟释放。
+// checkRelease 为 false 时不报告多余/未配对的释放（对象可能在本函数外加锁）。
 func analyze(g *cfg.CFG, obj object, info *types.Info, checkRelease bool, report func(token.Pos, string)) {
 	queue := []work{{block: g.Blocks[0]}}
 	seen := make(map[work]bool)
@@ -302,6 +323,8 @@ func analyze(g *cfg.CFG, obj object, info *types.Info, checkRelease bool, report
 	}
 }
 
+// transfer 计算 node 对 obj 状态的影响并返回后继状态; 同时在重复加锁、未配对释放、
+// Wait 前仍有未完成的 Add 时直接报告。
 func transfer(node ast.Node, s state, obj object, info *types.Info, checkRelease bool, report func(token.Pos, string)) []state {
 	var call *ast.CallExpr
 	deferred := false
@@ -390,6 +413,7 @@ func transfer(node ast.Node, s state, obj object, info *types.Info, checkRelease
 	return []state{s}
 }
 
+// missingMessage 返回退出路径上存在未配对操作时的报告文案。
 func missingMessage(obj object) string {
 	if obj.kind == "WaitGroup" {
 		return "WaitGroup 在 Wait 或退出时存在未配配的 Add"
@@ -397,6 +421,7 @@ func missingMessage(obj object) string {
 	return obj.kind + " 存在退出路径未配对的同步操作"
 }
 
+// isSafeGo 判断 call 是否为 sharkapp.SafeGo 方法调用, 它与 go 语句一样异步执行传入的闭包。
 func isSafeGo(call *ast.CallExpr, info *types.Info) bool {
 	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
 	if !ok {

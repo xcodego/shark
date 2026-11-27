@@ -10,6 +10,7 @@ import (
 	"github.com/xcodego/shark/sharklint/go/format"
 )
 
+// writeFile 创建 path 的父目录并写入 content, 供测试构造源码文件。
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -20,6 +21,7 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// TestLint 验证未格式化的文件（含测试文件和被构建标签排除的文件）被报告。
 func TestLint(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "clean.go"), "package example\n\nfunc clean() {}\n")
@@ -45,6 +47,7 @@ func TestLint(t *testing.T) {
 	}
 }
 
+// TestLintErrors 验证格式错误、目录不存在和非目录的错误报告。
 func TestLintErrors(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "broken.go"), "package example\nfunc broken( {\n")

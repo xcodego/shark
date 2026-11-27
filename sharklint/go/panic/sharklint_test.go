@@ -10,6 +10,7 @@ import (
 	"github.com/xcodego/shark/sharklint/go/panic"
 )
 
+// writeFile 创建 path 的父目录并写入 content, 供测试构造源码文件。
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -20,6 +21,7 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// TestLintReportsPanicCalls 验证非 main 函数中的 panic 被报告, main 函数、注释及 Logger.Panic 不报告。
 func TestLintReportsPanicCalls(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "panic.go"), `package example
@@ -65,6 +67,7 @@ func helper() { panic("reported") }
 	}
 }
 
+// TestLintForceIgnoreAndErrors 验证豁免注释及各类错误的报告。
 func TestLintForceIgnoreAndErrors(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "panic.go"), `package example

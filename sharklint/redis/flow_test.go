@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// TestKeyDataFlowAndBoundaries 验证 key 数据流分析：变量传播、分支合并、切片与 map 的各类边界。
 func TestKeyDataFlowAndBoundaries(t *testing.T) {
 	dir := fixture(t)
 	writeFile(t, filepath.Join(dir, "redis", "redis.go"), `package redis
@@ -134,6 +135,7 @@ func parameters(ctx context.Context, c *r.Client, keys []string, values map[stri
 	checkKeyDiagnostics(t, dir, source)
 }
 
+// TestLoopAppendTerminates 验证循环中 append 累积参数时数据流分析能够收敛。
 func TestLoopAppendTerminates(t *testing.T) {
 	dir := fixture(t)
 	writeFile(t, filepath.Join(dir, "redis", "redis.go"), `package redis

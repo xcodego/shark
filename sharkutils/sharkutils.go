@@ -1,4 +1,4 @@
-// Package sharkutils 提供了一些通用的工具函数。
+// Package sharkutils 提供随机数、哈希、客户端 IP、时间格式、TiDB CDC 解码等通用工具。
 package sharkutils
 
 import (
@@ -20,7 +20,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// RandNum 返回 [min, max) 内的随机整数；min <= 0 或 min >= max 时返回 0。
+// RandNum 返回 [min, max) 内的随机整数。min <= 0 或 min >= max 时返回 0。
 func RandNum(min int, max int) int {
 	if min <= 0 || min >= max {
 		return 0
@@ -28,15 +28,17 @@ func RandNum(min int, max int) int {
 	return crand.IntN(max-min) + min
 }
 
-// Md5 返回数据的 MD5 十六进制摘要。
+// Md5 返回 data 的 MD5 十六进制摘要（小写）。
 func Md5(data []byte) string {
 	sum := md5.Sum(data)
 	return hex.EncodeToString(sum[:])
 }
 
-// GetClientIp 从 X-Forwarded-For、X-Real-Ip 或 RemoteAddr 中获取客户端 IP。
+// GetClientIp 按 X-Forwarded-For、X-Real-Ip、RemoteAddr 的顺序取客户端 IP。
+// X-Forwarded-For 只取逗号前第一段；X-Real-Ip 取整段。两者都去掉首尾空白，命中后直接返回。
+// RemoteAddr 能拆出主机时返回主机，否则返回原值。request 为 nil 时返回空字符串。
+// 不判断这些头是否来自可信代理。
 func GetClientIp(request *http.Request) string {
-	// 审查: 忽略信任问题
 	if request == nil {
 		return ""
 	}
@@ -55,19 +57,25 @@ func GetClientIp(request *http.Request) string {
 	return request.RemoteAddr
 }
 
-// BcryptHash 使用 bcrypt.DefaultCost 对密码进行哈希。
+// BcryptHash 用 bcrypt.DefaultCost 哈希密码。生成失败时返回空字符串。
 func BcryptHash(password string) string {
 	bytes, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	return string(bytes)
 }
 
-// BcryptCheck 检查明文密码是否与 bcrypt 哈希匹配。
+// BcryptCheck 判断 password 是否与 bcrypt 哈希 hashedPassword 匹配。
 func BcryptCheck(hashedPassword string, password string) bool {
 	err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(password))
 	return err == nil
 }
 
-// DrainChannelN 最多读取 size 条数据，并支持 context 取消和超时等待。
+// DrainChannelN 从 ch 取出最多 size 条数据。
+//
+// 先阻塞直到读到第一条、通道关闭或 ctx 取消，这段不受 timeout 限制。
+// 读到第一条之后，通道里已有的数据会继续取出。通道暂时为空时，timeout > 0 才继续等，
+// 等待从读到第一条起算，最长约 timeout，并且只在通道空闲时生效；持续有数据则会一直读到 size 条。
+// 等待使用 time.Sleep，每段最多 1 秒，睡眠期间不检查 ctx。
+// ch 为 nil 或 size 为 0 时返回空切片；size 小于 0 时 panic。ctx 为 nil 时使用 context.Background。
 func DrainChannelN[T any](ctx context.Context, ch <-chan T, size int, timeout time.Duration) []T {
 	if ctx == nil {
 		ctx = context.Background()
@@ -111,12 +119,13 @@ func DrainChannelN[T any](ctx context.Context, ch <-chan T, size int, timeout ti
 	return result
 }
 
-// Pointer 返回 v 的指针。
+// Pointer 返回指向 v 副本的指针。
 func Pointer[T any](v T) *T {
 	return &v
 }
 
-// FormatToRFC3330 将 "2024-01-02 15:04:05" 转为 RFC3339，如 "2024-01-02T15:04:05Z"。
+// FormatToRFC3330 把 "2006-01-02 15:04:05" 按 UTC 解析，并格式化为 RFC3339，如 "2024-01-02T15:04:05Z"。
+// s 为 nil、空串或解析失败时返回 nil。
 func FormatToRFC3330(s *string) *string {
 	if s == nil || *s == "" {
 		return nil
@@ -129,7 +138,8 @@ func FormatToRFC3330(s *string) *string {
 	return &str
 }
 
-// FormatRFC3330WithLocation 按指定时区解析时间，如上海时间 "2024-01-02 15:04:05" 转为 "2024-01-02T15:04:05+08:00"。
+// FormatRFC3330WithLocation 按 loc 解析 "2006-01-02 15:04:05"，再格式化为 RFC3339。
+// 例如上海时区得到 "2024-01-02T15:04:05+08:00"。s 为 nil、空串或解析失败时返回 nil。loc 不能为 nil。
 func FormatRFC3330WithLocation(s *string, loc *time.Location) *string {
 	if s == nil || *s == "" {
 		return nil
@@ -142,8 +152,9 @@ func FormatRFC3330WithLocation(s *string, loc *time.Location) *string {
 	return &str
 }
 
-// FormatRFC3330WithFormat 按 format 解析后转为 RFC3339。
-// 如 "02/01/2024 15:04:05"（format: "02/01/2006 15:04:05"）转为 "2024-01-02T15:04:05Z"。
+// FormatRFC3330WithFormat 按 format 解析（字符串本身无时区时视为 UTC），再格式化为 RFC3339。
+// 如 format 为 "02/01/2006 15:04:05" 时，"02/01/2024 15:04:05" 得到 "2024-01-02T15:04:05Z"。
+// s 为 nil、空串或解析失败时返回 nil。
 func FormatRFC3330WithFormat(s *string, format string) *string {
 	if s == nil || *s == "" {
 		return nil
@@ -156,8 +167,9 @@ func FormatRFC3330WithFormat(s *string, format string) *string {
 	return &str
 }
 
-// FormatToRFC3330WithFormatAndLocation 按 format 和指定时区解析后转为 RFC3339。
-// 如上海时间 "02/01/2024 15:04:05"（format: "02/01/2006 15:04:05"）转为 "2024-01-02T15:04:05+08:00"。
+// FormatToRFC3330WithFormatAndLocation 按 format 和 loc 解析，再格式化为 RFC3339。
+// 如上海时区、format 为 "02/01/2006 15:04:05" 时，"02/01/2024 15:04:05" 得到 "2024-01-02T15:04:05+08:00"。
+// s 为 nil、空串或解析失败时返回 nil。loc 不能为 nil。
 func FormatToRFC3330WithFormatAndLocation(s *string, format string, loc *time.Location) *string {
 	if s == nil || *s == "" {
 		return nil
@@ -170,7 +182,8 @@ func FormatToRFC3330WithFormatAndLocation(s *string, format string, loc *time.Lo
 	return &str
 }
 
-// MakeKey 将参数序列化为字符串键。
+// MakeKey 把参数按序号组成 JSON 对象作为键。MakeKey("a", 1) 得到 {"0":"a","1":1}，无参数时得到 {}。
+// 序列化失败时返回空字符串。
 func MakeKey(args ...any) string {
 	m := make(map[int]any)
 	for k, v := range args {
@@ -180,7 +193,19 @@ func MakeKey(args ...any) string {
 	return string(b)
 }
 
-// TidbCdcUnmarshal 将字段值为字符串的 TiDB CDC JSON 解码到结构体，并按字段类型转换。
+// TidbCdcUnmarshal 把 TiDB CDC 的行 JSON 解码进结构体。各字段的值须为字符串或 null。
+// v 必须是非 nil 的结构体指针。按 json 标签逗号前的名字匹配；标签为空、为 "-" 或未导出的字段会跳过。
+// 匿名嵌入的结构体值（json 名为空，且不是 time.Time）会展开到同一层。
+// 字段缺失时保持原值；值为 null 时置为零值。
+//
+// 字符串按字段类型转换：
+//   - *string 的空串保留为指向 "" 的指针；其他类型的空串置为零值
+//   - 整数按十进制解析，失败时接受没有小数部分的浮点写法（如 "1.0"）
+//   - 无符号整数、浮点数按十进制解析
+//   - bool 接受 1/t/true/y/yes/on 与 0/f/false/n/no/off，忽略大小写
+//   - time.Time 按 time.Local 解析 RFC3339、日期、日期时间或当天时间
+//   - []byte 写入字符串的原始字节
+//   - 其他类型把该字符串再按 JSON 解码
 func TidbCdcUnmarshal(data string, v any) error {
 	if data == "" {
 		return fmt.Errorf("cdc: data is empty")
@@ -196,9 +221,11 @@ func TidbCdcUnmarshal(data string, v any) error {
 
 	timeType := reflect.TypeOf(time.Time{})
 
+	// setValue 把一列字符串写入字段。sp 为 nil 表示 JSON null。
 	var setValue func(fv reflect.Value, sp *string) error
 	setValue = func(fv reflect.Value, sp *string) error {
 		if fv.Kind() == reflect.Pointer {
+			// 空串只对 *string 保留，其余指针置为 nil
 			if sp == nil || (*sp == "" && fv.Type().Elem().Kind() != reflect.String) {
 				fv.SetZero()
 				return nil
@@ -224,6 +251,7 @@ func TidbCdcUnmarshal(data string, v any) error {
 			return nil
 		}
 		if fv.Type() == timeType {
+			// 有 T 且带时区用 RFC3339Nano；否则按日期、日期时间或当天时间解析，无时区用 time.Local
 			var layout string
 			switch {
 			case strings.Contains(s, "T"):
@@ -254,6 +282,7 @@ func TidbCdcUnmarshal(data string, v any) error {
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 			n, err := strconv.ParseInt(s, 10, 64)
 			if err != nil {
+				// CDC 有时把整数写成 "1.0"
 				f, ferr := strconv.ParseFloat(s, 64)
 				if ferr != nil || f != float64(int64(f)) {
 					return err
@@ -300,6 +329,7 @@ func TidbCdcUnmarshal(data string, v any) error {
 		return nil
 	}
 
+	// fill 按 json 标签填字段；匿名结构体展开，缺失的键不改原值
 	var fill func(sv reflect.Value) error
 	fill = func(sv reflect.Value) error {
 		st := sv.Type()
@@ -328,7 +358,7 @@ func TidbCdcUnmarshal(data string, v any) error {
 	return fill(rv.Elem())
 }
 
-// Compress 使用 zlib 压缩数据。
+// Compress 用 zlib 默认压缩级别压缩 data。
 func Compress(data []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	writer := zlib.NewWriter(&buf)
@@ -344,7 +374,7 @@ func Compress(data []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// Decompress 解压 zlib 数据。
+// Decompress 解压 zlib 数据并返回全部字节。
 func Decompress(data []byte) ([]byte, error) {
 	reader, err := zlib.NewReader(bytes.NewReader(data))
 	if err != nil {

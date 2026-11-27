@@ -11,6 +11,7 @@ import (
 	"github.com/xcodego/shark/sharklint/go/maprace"
 )
 
+// TestConcurrentAccess 按源码中的行尾标记逐行校验 map 并发访问的报告与不报告。
 func TestConcurrentAccess(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "go.mod"), "module example.com/test\n\ngo 1.26\n")
@@ -150,10 +151,12 @@ func fields() {
 	}
 }
 
+// fmtLine 返回用于匹配诊断位置的 ":行号:" 片段。
 func fmtLine(line int) string {
 	return ":" + strconv.Itoa(line) + ":"
 }
 
+// write 把 text 写入 path。
 func write(t *testing.T, path, text string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(text), 0644); err != nil {
@@ -161,6 +164,7 @@ func write(t *testing.T, path, text string) {
 	}
 }
 
+// TestErrors 验证空目录通过, 目录不存在时报错。
 func TestErrors(t *testing.T) {
 	dir := t.TempDir()
 	if err := maprace.Lint(dir); err != nil {
@@ -171,6 +175,7 @@ func TestErrors(t *testing.T) {
 	}
 }
 
+// TestSafeGo 验证 sharkapp.SafeGo 启动的闭包与 go 语句同样被检查。
 func TestSafeGo(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "go.mod"), "module github.com/xcodego/shark\n\ngo 1.26\n")
@@ -185,6 +190,7 @@ func TestSafeGo(t *testing.T) {
 	}
 }
 
+// TestLoadError 验证包加载错误被报告。
 func TestLoadError(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "go.mod"), "module example.com/bad\n\ngo 1.26\n")

@@ -1,63 +1,27 @@
-// Package sharkeswhere 提供将 SQL WHERE 风格字符串解析为 Elasticsearch Query DSL 的能力。
-//
-// 支持的操作符映射：
-//
-//	=      -> term query
-//	!=     -> bool.must_not + term
-//	>      -> range gt
-//	>=     -> range gte
-//	<      -> range lt
-//	<=     -> range lte
-//	in     -> terms
-//	like   -> match
-//	and    -> bool.must (自动扁平化)
-//	or     -> bool.should (自动扁平化)
-//	()     -> 分组
-//
-// select 聚合函数：
-//
-//	sum(field) / avg(field) / count(field) / count(*) / min(field) / max(field)
-//	可选 as 别名，例如 sum(amount) as total
-//	聚合存在时自动 size=0
-//
-// select 表达式：
-//
-//	a + b as c, a - b, a * b, a / b → ES script_fields (Painless)
-//
-// 完整语法：
-//
-//	select field1, field2 from indexname where conditions limit N offset N
-//
-// select   → ES _source 字段过滤（可选）
-// from     → 指定索引名（可选，在 where 之前）
-// where    → 查询条件
-// limit    → ES size（可选）
-// offset   → ES from（分页偏移，可选，必须在 limit 之后）
-package sharkeswhere
+package sharkelastic
 
 import (
 	"fmt"
 	"strings"
 )
 
-// ParsedQuery 是 Build 的解析结果。
+// ParsedQuery 是 SQL 风格查询解析后的结果。
 type ParsedQuery struct {
-	Index string
-	Body  map[string]any
+	Index string         // Elasticsearch 索引名，来自 from 子句；缺省为空
+	Body  map[string]any // Elasticsearch 查询体
 }
 
-// ---------------------------------------------------------------------------
-// select item 类型
-// ---------------------------------------------------------------------------
-
+// selectItemType 是 select 列表中单项的类别。
 type selectItemType int
 
+// select 项类别：普通字段、聚合函数、算术表达式。
 const (
 	selPlain selectItemType = iota
 	selAgg
 	selExpr
 )
 
+// selectItem 是解析后的 select 列表单项。
 type selectItem struct {
 	Type      selectItemType
 	Alias     string
@@ -68,17 +32,19 @@ type selectItem struct {
 	ExprParts []aggExprPart
 }
 
+// aggExprPart 是算术表达式中引用的一个聚合函数调用，如 sum(price)。
 type aggExprPart struct {
 	FuncName string
 	Field    string
 	RefName  string
 }
 
-// ---------------------------------------------------------------------------
-// Build
-// ---------------------------------------------------------------------------
-
-// Build 将支持的 SQL 风格查询解析为 Elasticsearch 查询条件。
+// Build 将 SQL 风格查询解析为 Elasticsearch 查询。
+//
+// 语法：[select ...] [from index] [where cond] [order by ...] [limit N] [offset N]，
+// 各子句均可省略，仅有条件时可直接传入 where 之后的内容。
+// select 含聚合函数或算术表达式时 size 置 0 并生成 aggs / script_fields。
+// where 支持 = != > >= < <= like in 以及 and / or / 括号；like 映射为 match 全文查询。
 func Build(where string) (*ParsedQuery, error) {
 	input := strings.TrimSpace(where)
 	if input == "" {
@@ -167,6 +133,7 @@ func Build(where string) (*ParsedQuery, error) {
 			body["from"] = esFrom
 		}
 		if len(plainFields) > 0 {
+			// 含算术表达式的非聚合查询通过 script_fields 返回，此时不能同时用 _source 过滤，且 size 被置 0
 			var sf map[string]any
 			for _, item := range selectItems {
 				if item.Type == selExpr {
@@ -200,9 +167,9 @@ func Build(where string) (*ParsedQuery, error) {
 	return &ParsedQuery{Index: fromIndex, Body: body}, nil
 }
 
-// buildAggs 构建 ES aggs DSL。
-// bucket_script 是 pipeline 聚合，必须嵌套在 bucket 聚合内。
-// 当存在 selExpr 时，用一个 filter(match_all) 包裹所有聚合。
+// buildAggs 构建 Elasticsearch 聚合查询。
+// 存在聚合算术表达式时，需要 bucket_script 管道聚合，而它必须挂在某个 bucket 聚合之下，
+// 因此所有聚合被包进一个 match_all 的 filters 聚合（all/_all）里。
 func buildAggs(items []selectItem) map[string]any {
 	aggs := make(map[string]any)
 	hasPipeline := false
@@ -248,9 +215,6 @@ func buildAggs(items []selectItem) map[string]any {
 		}
 	}
 
-	// bucket_script 是 pipeline 聚合，必须嵌套在 bucket 聚合内。
-	// 使用 filters 聚合（multi-bucket）包裹，兼容所有 ES 版本。
-	// 响应路径：aggregations.all.buckets._all.<alias>.value
 	if hasPipeline {
 		return map[string]any{
 			"all": map[string]any{
@@ -266,6 +230,7 @@ func buildAggs(items []selectItem) map[string]any {
 	return aggs
 }
 
+// buildSingleAgg 将单个聚合函数转换为 ES 聚合；count(*) 对 _id 计数。
 func buildSingleAgg(item selectItem) map[string]any {
 	switch item.AggFunc {
 	case "sum":
@@ -286,6 +251,7 @@ func buildSingleAgg(item selectItem) map[string]any {
 	}
 }
 
+// buildScriptFields 为不含聚合函数的算术表达式生成 script_fields。
 func buildScriptFields(items []selectItem) map[string]any {
 	sf := make(map[string]any)
 	for _, item := range items {
@@ -305,6 +271,7 @@ func buildScriptFields(items []selectItem) map[string]any {
 	return sf
 }
 
+// fieldExprToPainless 将字段算术表达式转换为 Painless 脚本：标识符转为 doc['field'].value，数字与运算符原样保留。
 func fieldExprToPainless(expr string) string {
 	var result strings.Builder
 	i := 0
@@ -338,19 +305,19 @@ func fieldExprToPainless(expr string) string {
 	return result.String()
 }
 
+// isExprDelim 判断是否为表达式中的分隔字符（空白、运算符、括号）。
 func isExprDelim(c byte) bool {
 	return c == ' ' || c == '\t' || c == '+' || c == '-' || c == '*' || c == '/' || c == '(' || c == ')'
 }
 
+// sanitizeAlias 将表达式转成可用作 script_fields 名称的字符串（运算符替换为 _plus_ 等）。
 func sanitizeAlias(expr string) string {
 	r := strings.NewReplacer("+", "_plus_", "-", "_minus_", "*", "_mul_", "/", "_div_", " ", "", "(", "", ")", "")
 	return r.Replace(expr)
 }
 
-// ---------------------------------------------------------------------------
-// select 解析
-// ---------------------------------------------------------------------------
-
+// extractSelect 解析开头的 select 列表，返回剩余部分及各项；select * 或无 select 时 items 为空。
+// 以 " from " 或 " where " 作为列表结束位置。
 func extractSelect(input string) (remaining string, items []selectItem) {
 	lower := strings.ToLower(input)
 	if !strings.HasPrefix(lower, "select ") && !strings.HasPrefix(lower, "select\t") {
@@ -384,6 +351,7 @@ func extractSelect(input string) (remaining string, items []selectItem) {
 	return remaining, items
 }
 
+// parseSelectItems 按顶层逗号（忽略括号内）拆分并解析 select 列表。
 func parseSelectItems(raw string) []selectItem {
 	var items []selectItem
 	parts := splitSelectTopLevel(raw, ',')
@@ -397,6 +365,7 @@ func parseSelectItems(raw string) []selectItem {
 	return items
 }
 
+// splitSelectTopLevel 按分隔符拆分字符串，括号内的分隔符不拆分。
 func splitSelectTopLevel(s string, sep byte) []string {
 	var parts []string
 	depth := 0
@@ -418,6 +387,7 @@ func splitSelectTopLevel(s string, sep byte) []string {
 	return parts
 }
 
+// parseSelectItem 解析单个 select 项，依次识别 as 别名、聚合函数、算术表达式，否则视为普通字段。
 func parseSelectItem(raw string) selectItem {
 	raw = strings.TrimSpace(raw)
 	var alias string
@@ -434,7 +404,6 @@ func parseSelectItem(raw string) selectItem {
 		return aggItem
 	}
 
-	// 解开最外层括号，支持 (sum(a)-sum(b)) as c 这类包裹形式
 	unwrapped := withoutAlias
 	for len(unwrapped) > 0 && unwrapped[0] == '(' {
 		closeIdx := findMatchingParen(unwrapped, 0)
@@ -455,24 +424,19 @@ func parseSelectItem(raw string) selectItem {
 	return selectItem{Type: selPlain, Alias: alias, Field: field}
 }
 
-// findAsKeyword 查找独立关键字 "as" 的位置，返回 (idx, sepLen)。
-// "as" 被视为关键字当且仅当它的前后都是非标识符字符（或边界）。
-// 标识符字符包括：字母、数字、下划线。
+// findAsKeyword 返回独立关键字 as（前后不是标识符字符）的位置和长度，未找到返回 -1。
 func findAsKeyword(s string) (int, int) {
 	lower := strings.ToLower(s)
 	for i := 0; i < len(lower); i++ {
-		// 找 "as" 子串
 		if lower[i] != 'a' {
 			continue
 		}
 		if i+1 >= len(lower) || lower[i+1] != 's' {
 			continue
 		}
-		// 前面必须是边界或非标识符字符（如空格、Tab、) 等）
 		if i > 0 && isIdentChar(lower[i-1]) {
 			continue
 		}
-		// 后面必须是边界或非标识符字符
 		after := i + 2
 		if after < len(lower) && isIdentChar(lower[after]) {
 			continue
@@ -482,11 +446,12 @@ func findAsKeyword(s string) (int, int) {
 	return -1, 0
 }
 
-// isIdentChar 判断字符是否属于标识符（字母/数字/下划线）。
+// isIdentChar 判断是否为标识符字符（字母、数字、下划线）。
 func isIdentChar(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
 
+// tryParseAgg 识别整项为 sum/avg/count/min/max 单个聚合调用的情况。
 func tryParseAgg(raw, alias string) (selectItem, bool) {
 	lower := strings.ToLower(raw)
 	aggFuncs := []string{"sum", "avg", "count", "min", "max"}
@@ -509,6 +474,7 @@ func tryParseAgg(raw, alias string) (selectItem, bool) {
 	return selectItem{}, false
 }
 
+// containsArithOps 判断是否存在括号之外的 + - * / 运算符，聚合函数内部的运算符不算。
 func containsArithOps(s string) bool {
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
@@ -521,6 +487,7 @@ func containsArithOps(s string) bool {
 	return false
 }
 
+// isInsideParens 判断 pos 位置是否位于括号内。
 func isInsideParens(s string, pos int) bool {
 	depth := 0
 	for i := 0; i < pos; i++ {
@@ -536,6 +503,7 @@ func isInsideParens(s string, pos int) bool {
 	return depth > 0
 }
 
+// extractAggExprParts 提取表达式中所有 sum/avg/count/min/max 调用，用于生成对应聚合及 buckets_path。
 func extractAggExprParts(expr string) []aggExprPart {
 	var parts []aggExprPart
 	fns := []string{"sum", "avg", "count", "min", "max"}
@@ -569,6 +537,7 @@ func extractAggExprParts(expr string) []aggExprPart {
 	return parts
 }
 
+// findMatchingParen 返回与 openIdx 处左括号匹配的右括号位置，找不到返回 -1。
 func findMatchingParen(s string, openIdx int) int {
 	if openIdx < 0 || openIdx >= len(s) || s[openIdx] != '(' {
 		return -1
@@ -588,6 +557,7 @@ func findMatchingParen(s string, openIdx int) int {
 	return -1
 }
 
+// trimBacktick 去掉首尾成对的反引号。
 func trimBacktick(s string) string {
 	if len(s) >= 2 && s[0] == '`' && s[len(s)-1] == '`' {
 		return s[1 : len(s)-1]
@@ -595,6 +565,7 @@ func trimBacktick(s string) string {
 	return s
 }
 
+// findKeywordBoundary 返回关键字（含两侧空格）首次出现的位置，未找到返回 -1。
 func findKeywordBoundary(s, keyword string) int {
 	idx := strings.Index(s, keyword)
 	if idx < 0 {
@@ -603,6 +574,7 @@ func findKeywordBoundary(s, keyword string) int {
 	return idx
 }
 
+// findKeywordEndBoundary 判断关键字是否位于字符串末尾（忽略尾部空白），是则返回其起始位置，否则返回 -1。
 func findKeywordEndBoundary(s, keyword string) int {
 	trimmed := strings.TrimRight(s, " \t")
 	if strings.HasSuffix(strings.ToLower(trimmed), keyword) {
@@ -611,6 +583,7 @@ func findKeywordEndBoundary(s, keyword string) int {
 	return -1
 }
 
+// extractFrom 解析开头的 from 子句，返回剩余部分和索引名（可用反引号包裹）。
 func extractFrom(input string) (remaining string, indexName string) {
 	trimmed := strings.TrimLeft(input, " \t")
 	lower := strings.ToLower(trimmed)
@@ -628,6 +601,7 @@ func extractFrom(input string) (remaining string, indexName string) {
 	return remaining, indexName
 }
 
+// extractWhere 去掉开头的 where 关键字，found 表示是否存在该关键字。
 func extractWhere(input string) (remaining string, found bool) {
 	trimmed := strings.TrimLeft(input, " \t")
 	lowerTrimmed := strings.ToLower(trimmed)
@@ -641,6 +615,7 @@ func extractWhere(input string) (remaining string, found bool) {
 	return input, false
 }
 
+// extractLimitOffset 从末尾解析 offset 和 limit（先 offset 后 limit），返回去掉后的剩余部分；值为 0 视为未指定。
 func extractLimitOffset(input string) (remaining string, size int, from int) {
 	lower := strings.ToLower(input)
 	offsetIdx := lastKeywordIndex(lower, "offset")
@@ -669,6 +644,7 @@ func extractLimitOffset(input string) (remaining string, size int, from int) {
 	return input, size, from
 }
 
+// extractOrderBy 解析 order by 列表（方向缺省为 asc），并把其后的 limit/offset 尾部拼回剩余部分。
 func extractOrderBy(input string) (remaining string, sortBody []any) {
 	lower := strings.ToLower(input)
 	idx := lastKeywordIndex(lower, "order by")
@@ -711,6 +687,7 @@ func extractOrderBy(input string) (remaining string, sortBody []any) {
 	return remaining, sortBody
 }
 
+// lastKeywordIndex 返回关键字最后一次作为独立单词出现的位置，未找到返回 -1。
 func lastKeywordIndex(s, keyword string) int {
 	idx := strings.LastIndex(s, keyword)
 	if idx < 0 {
@@ -726,6 +703,7 @@ func lastKeywordIndex(s, keyword string) int {
 	return idx
 }
 
+// parseInt 解析由十进制数字组成的字符串，含其他字符返回 false（空串返回 0, true）。
 func parseInt(s string) (int, bool) {
 	var n int
 	for _, c := range s {
@@ -737,17 +715,13 @@ func parseInt(s string) (int, bool) {
 	return n, true
 }
 
-// ---------------------------------------------------------------------------
-// 公开类型
-// ---------------------------------------------------------------------------
-
-// Token 表示 SQL 风格查询中的一个词法单元。
+// Token 表示查询中的词法单元，主要用于调试和测试。
 type Token struct {
-	Typ string
-	Val string
+	Typ string // token 类型：FIELD、OP、VALUE、LPAREN、RPAREN、COMMA、AND、OR
+	Val string // token 值
 }
 
-// Tokenize 将 Elasticsearch SQL 风格查询切分为 token。
+// Tokenize 将 where 条件切分为 token，结果不含结尾的 EOF。
 func Tokenize(input string) ([]Token, error) {
 	tokens, err := tokenize(input)
 	if err != nil {
@@ -763,15 +737,12 @@ func Tokenize(input string) ([]Token, error) {
 	return result, nil
 }
 
-// ParseValue 将查询字面量转换为对应的 Go 值。
+// ParseValue 将查询字面量转换为 Go 值：能无损还原的整数为 int64，浮点为 float64，其余保持字符串。
 func ParseValue(s string) any {
 	return parseValue(s)
 }
 
-// ---------------------------------------------------------------------------
-// 词法分析
-// ---------------------------------------------------------------------------
-
+// tokType 是词法单元类型。
 type tokType int
 
 const (
@@ -786,11 +757,14 @@ const (
 	tokOr
 )
 
+// token 是内部词法单元。
 type token struct {
 	typ   tokType
 	value string
 }
 
+// tokenize 将 where 条件切分为 token，以 tokEOF 结尾。
+// 引号字面量为值，反引号内容为字段名；裸单词除 and/or/in/like 外均视为字段名。
 func tokenize(input string) ([]token, error) {
 	var tokens []token
 	runes := []rune(input)
@@ -935,14 +909,17 @@ func tokenize(input string) ([]token, error) {
 	return tokens, nil
 }
 
+// isLetter 判断是否为 ASCII 字母。
 func isLetter(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
+// isDigit 判断是否为 ASCII 数字。
 func isDigit(r rune) bool {
 	return r >= '0' && r <= '9'
 }
 
+// tokTypeName 返回 token 类型的可读名称。
 func tokTypeName(t tokType) string {
 	switch t {
 	case tokEOF:
@@ -968,15 +945,13 @@ func tokTypeName(t tokType) string {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// 语法解析
-// ---------------------------------------------------------------------------
-
+// parser 是 where 条件的递归下降解析器，优先级：括号 > and > or。
 type parser struct {
 	tokens []token
 	pos    int
 }
 
+// cur 返回当前 token，越界时返回 EOF。
 func (p *parser) cur() token {
 	if p.pos < len(p.tokens) {
 		return p.tokens[p.pos]
@@ -986,10 +961,12 @@ func (p *parser) cur() token {
 
 func (p *parser) advance() { p.pos++ }
 
+// parseWhere 解析完整的条件表达式。
 func (p *parser) parseWhere() (map[string]any, error) {
 	return p.parseOr()
 }
 
+// parseOr 解析 or 表达式，合并为 bool.should。
 func (p *parser) parseOr() (map[string]any, error) {
 	left, err := p.parseAnd()
 	if err != nil {
@@ -1006,6 +983,7 @@ func (p *parser) parseOr() (map[string]any, error) {
 	return left, nil
 }
 
+// parseAnd 解析 and 表达式，合并为 bool.must。
 func (p *parser) parseAnd() (map[string]any, error) {
 	left, err := p.parseUnary()
 	if err != nil {
@@ -1022,6 +1000,7 @@ func (p *parser) parseAnd() (map[string]any, error) {
 	return left, nil
 }
 
+// parseUnary 解析括号子表达式或单个比较。
 func (p *parser) parseUnary() (map[string]any, error) {
 	if p.cur().typ == tokLParen {
 		p.advance()
@@ -1038,6 +1017,7 @@ func (p *parser) parseUnary() (map[string]any, error) {
 	return p.parseComparison()
 }
 
+// parseComparison 解析 "字段 运算符 值" 形式的单个比较，并转换为对应 ES 查询。
 func (p *parser) parseComparison() (map[string]any, error) {
 	if p.cur().typ != tokField {
 		return nil, fmt.Errorf("期望字段名，但得到 '%s'", p.cur().value)
@@ -1099,6 +1079,7 @@ func (p *parser) parseComparison() (map[string]any, error) {
 	}
 }
 
+// parseValue 读取一个字面量值。
 func (p *parser) parseValue() (any, error) {
 	if p.cur().typ != tokValue {
 		return nil, fmt.Errorf("期望值，但得到 '%s'", p.cur().value)
@@ -1108,6 +1089,7 @@ func (p *parser) parseValue() (any, error) {
 	return val, nil
 }
 
+// parseIn 解析 in (v1, v2, ...) 列表，转换为 terms 查询，列表不能为空。
 func (p *parser) parseIn(field string) (map[string]any, error) {
 	if p.cur().typ != tokLParen {
 		return nil, fmt.Errorf("IN 后面期望 '('，但得到 '%s'", p.cur().value)
@@ -1136,6 +1118,7 @@ func (p *parser) parseIn(field string) (map[string]any, error) {
 	}
 }
 
+// parseValue 将字面量转为 Go 值：整数 int64、浮点 float64，不能无损往返的（如 "007"）保持字符串。
 func parseValue(s string) any {
 	var iv int64
 	if n, err := fmt.Sscanf(s, "%d", &iv); err == nil && n == 1 && fmt.Sprintf("%d", iv) == s {
@@ -1148,38 +1131,46 @@ func parseValue(s string) any {
 	return s
 }
 
+// termQuery 构造精确匹配查询。
 func termQuery(field string, value any) map[string]any {
 	return map[string]any{"term": map[string]any{field: value}}
 }
 
+// termsQuery 构造多值匹配查询（in）。
 func termsQuery(field string, values []any) map[string]any {
 	return map[string]any{"terms": map[string]any{field: values}}
 }
 
+// matchQuery 构造全文匹配查询（like）。
 func matchQuery(field string, value any) map[string]any {
 	return map[string]any{"match": map[string]any{field: value}}
 }
 
+// rangeQuery 构造范围查询，op 为 gt/gte/lt/lte。
 func rangeQuery(field, op string, value any) map[string]any {
 	return map[string]any{"range": map[string]any{field: map[string]any{op: value}}}
 }
 
+// mustNotQuery 构造取反查询（!=）。
 func mustNotQuery(inner map[string]any) map[string]any {
 	return map[string]any{"bool": map[string]any{"must_not": inner}}
 }
 
+// mergeMust 用 and 合并两个查询，已是 bool.must 的一侧会被展开，避免嵌套过深。
 func mergeMust(left, right map[string]any) map[string]any {
 	lc := extractClauses(left, "must")
 	rc := extractClauses(right, "must")
 	return map[string]any{"bool": map[string]any{"must": append(lc, rc...)}}
 }
 
+// mergeShould 用 or 合并两个查询，已是 bool.should 的一侧会被展开，避免嵌套过深。
 func mergeShould(left, right map[string]any) map[string]any {
 	lc := extractClauses(left, "should")
 	rc := extractClauses(right, "should")
 	return map[string]any{"bool": map[string]any{"should": append(lc, rc...)}}
 }
 
+// extractClauses 返回 q 的 bool.<clause> 子句列表；q 不是该形式时将其自身作为单个子句。
 func extractClauses(q map[string]any, clause string) []any {
 	if b, ok := q["bool"]; ok {
 		if bm, ok := b.(map[string]any); ok {

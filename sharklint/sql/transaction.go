@@ -8,6 +8,7 @@ import (
 	"golang.org/x/tools/go/cfg"
 )
 
+// 事务检查的违规文案。
 const (
 	txDefer  = "事务开启后应 defer Rollback"
 	txOpen   = "事务退出时未提交或回滚"
@@ -19,21 +20,35 @@ const (
 	txConn   = "事务内禁止使用非事务数据库连接"
 )
 
+// transaction 描述一个待分析的事务。
 type transaction struct {
-	object   types.Object
-	err      types.Object
-	begin    *ast.CallExpr
+	// object 是事务变量。
+	object types.Object
+	// err 是接收 Begin 返回错误的变量，没有时为 nil。
+	err types.Object
+	// begin 是开启事务的调用；gorm Transaction 回调中的事务无此调用，为 nil。
+	begin *ast.CallExpr
+	// callback 表示事务来自 gorm Transaction 回调参数，由 gorm 负责提交和回滚。
 	callback bool
 }
 
+// 事务流分析状态的位标志。
 const (
+	// txStarted 表示已开启事务。
 	txStarted = 1 << iota
+	// txActive 表示事务尚未提交或回滚。
 	txActive
+	// txDeferred 表示已 defer Rollback。
 	txDeferred
+	// txUnknownError 表示 Begin 返回的错误尚未检查，此时事务可能并未真正开启。
 	txUnknownError
+	// txDeferredCommit 表示已 defer Commit。
 	txDeferredCommit
 )
 
+// checkTransactions 找出 file 中每个函数内开启的事务（database/sql 与 gorm 的 Begin，
+// 以及 gorm Transaction 回调的参数），对其逐一做流分析，返回违规列表。
+// 同一位置同一原因只报告一次，带豁免注释的位置不报告。
 func checkTransactions(file *ast.File, fset *token.FileSet, info *types.Info) []error {
 	var errors []error
 	reported := make(map[string]bool)
@@ -45,6 +60,7 @@ func checkTransactions(file *ast.File, fset *token.FileSet, info *types.Info) []
 			errors = append(errors, Violation{Position: position, Reason: reason})
 		}
 	}
+	// 先收集 gorm.Transaction 的回调函数字面量，其第一个参数即事务。
 	callbacks := make(map[*ast.FuncLit]bool)
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -133,6 +149,7 @@ func checkTransactions(file *ast.File, fset *token.FileSet, info *types.Info) []
 	return errors
 }
 
+// inspectBody 遍历 node 但不进入嵌套的函数字面量，使每个函数体独立分析。
 func inspectBody(node ast.Node, visit func(ast.Node)) {
 	ast.Inspect(node, func(n ast.Node) bool {
 		if n == nil {
@@ -146,6 +163,7 @@ func inspectBody(node ast.Node, visit func(ast.Node)) {
 	})
 }
 
+// objectOf 返回 id 定义或引用的对象。
 func objectOf(id *ast.Ident, info *types.Info) types.Object {
 	if obj := info.Defs[id]; obj != nil {
 		return obj
@@ -153,6 +171,7 @@ func objectOf(id *ast.Ident, info *types.Info) types.Object {
 	return info.Uses[id]
 }
 
+// isMethod 判断 call 是否调用了包 path 中名为 name 的方法。
 func isMethod(call *ast.CallExpr, info *types.Info, path, name string) bool {
 	fn, _ := calledFunc(call, info)
 	if fn == nil || fn.Pkg() == nil || fn.Pkg().Path() != path || fn.Name() != name {
@@ -162,12 +181,14 @@ func isMethod(call *ast.CallExpr, info *types.Info, path, name string) bool {
 	return ok && sig.Recv() != nil
 }
 
+// isBegin 判断 call 是否是开启事务的调用（sql Begin/BeginTx 或 gorm Begin）。
 func isBegin(call *ast.CallExpr, info *types.Info) bool {
 	return isMethod(call, info, "database/sql", "Begin") ||
 		isMethod(call, info, "database/sql", "BeginTx") ||
 		isMethod(call, info, "gorm.io/gorm", "Begin")
 }
 
+// receiver 返回方法调用的接收者表达式；方法表达式形式取第一个实参，无接收者时为 nil。
 func receiver(call *ast.CallExpr, info *types.Info) ast.Expr {
 	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
 	if !ok {
@@ -182,6 +203,7 @@ func receiver(call *ast.CallExpr, info *types.Info) ast.Expr {
 	return sel.X
 }
 
+// rootedIn 判断 expr 是否以 obj 为链式调用的起点（如 tx.Where(...).Find(...)）。
 func rootedIn(expr ast.Expr, obj types.Object, info *types.Info) bool {
 	if expr == nil {
 		return false
@@ -195,17 +217,25 @@ func rootedIn(expr ast.Expr, obj types.Object, info *types.Info) bool {
 	return false
 }
 
+// txWork 是流分析工作队列中的一项：在某基本块入口处的事务状态与连接状态。
 type txWork struct {
 	block       *cfg.Block
 	state       int
 	connections string
 }
 
+// txBlockState 是已访问状态的键：基本块与事务状态的组合。
 type txBlockState struct {
 	block *cfg.Block
 	state int
 }
 
+// analyzeTransaction 沿函数体的控制流图对单个事务做前向分析，状态为 (基本块, 事务状态) 组合：
+//   - 同一事务重复开启报嵌套；
+//   - 事务活跃期间检查 RPC、显式等待、非事务连接、写操作未检查错误、查询结果丢弃；
+//   - 函数退出时，非回调事务若未 defer Rollback 或仍未提交/回滚则报告。
+//
+// Begin 的错误分支（err != nil）视为事务未开启，对应路径上不再要求提交或回滚。
 func analyzeTransaction(body *ast.BlockStmt, tx transaction, info *types.Info, report func(token.Pos, string)) {
 	graph := cfg.New(body, func(call *ast.CallExpr) bool {
 		id, ok := ast.Unparen(call.Fun).(*ast.Ident)
@@ -220,6 +250,7 @@ func analyzeTransaction(body *ast.BlockStmt, tx transaction, info *types.Info, r
 	if tx.callback {
 		initialConnections = connections.set(initialConnections, tx.object, connectionTx)
 	}
+	// 带 default 分支的 select 中的接收操作不会阻塞，不算显式等待。
 	nonblocking := make(map[*ast.UnaryExpr]bool)
 	inspectBody(body, func(n ast.Node) {
 		selectStmt, ok := n.(*ast.SelectStmt)
@@ -347,6 +378,7 @@ func analyzeTransaction(body *ast.BlockStmt, tx transaction, info *types.Info, r
 	}
 }
 
+// endsTransaction 判断 expr 是否是事务的 Commit 或 Rollback 调用（可带 .Error 取值）。
 func endsTransaction(expr ast.Expr, tx transaction, info *types.Info) bool {
 	expr = ast.Unparen(expr)
 	if sel, ok := expr.(*ast.SelectorExpr); ok && sel.Sel.Name == "Error" {
@@ -356,11 +388,14 @@ func endsTransaction(expr ast.Expr, tx transaction, info *types.Info) bool {
 	return ok && (isEnd(call, tx, info, "Commit") || isEnd(call, tx, info, "Rollback"))
 }
 
+// isEnd 判断 call 是否是 tx 的名为 name（Commit 或 Rollback）的调用。
 func isEnd(call *ast.CallExpr, tx transaction, info *types.Info, name string) bool {
 	return (isMethod(call, info, "database/sql", name) || isMethod(call, info, "gorm.io/gorm", name)) &&
 		rootedIn(receiver(call, info), tx.object, info)
 }
 
+// errorCondition 解析 err == nil 或 err != nil（含 tx.Error）形式的条件，
+// 返回条件为真时是否表示出错，以及条件是否属于该形式。
 func errorCondition(expr ast.Expr, tx transaction, info *types.Info) (bool, bool) {
 	bin, ok := ast.Unparen(expr).(*ast.BinaryExpr)
 	if !ok || (bin.Op != token.EQL && bin.Op != token.NEQ) {
@@ -385,6 +420,8 @@ func errorCondition(expr ast.Expr, tx transaction, info *types.Info) (bool, bool
 	return false, false
 }
 
+// checkTransactionNode 检查事务活跃期间的单条语句：定时通道等待、time.Sleep、
+// 嵌套事务、RPC、非事务连接，以及事务上的写操作未检查错误、查询结果被丢弃。
 func checkTransactionNode(node, body ast.Node, tx transaction, info *types.Info, connections *connectionTracker, connectionState string, nonblocking map[*ast.UnaryExpr]bool, report func(token.Pos, string)) {
 	inspectBody(node, func(n ast.Node) {
 		if unary, ok := n.(*ast.UnaryExpr); ok && unary.Op == token.ARROW && !nonblocking[unary] && isTimerChannel(unary.X, info) {
@@ -425,7 +462,7 @@ func checkTransactionNode(node, body ast.Node, tx transaction, info *types.Info,
 		_, offset := calledFunc(call, info)
 		dest += offset
 		if path == "gorm.io/gorm" && (name == "Find" || name == "First" || name == "Last" || name == "Take" || name == "Scan" || name == "Pluck" || name == "Count") && len(call.Args) > dest {
-			// A non-nil destination is itself a query result.
+			// 目标参数非 nil 时，查询结果已写入目标，不属于被丢弃；仅目标为 nil 时才可能丢弃。
 			id, ok := ast.Unparen(call.Args[dest]).(*ast.Ident)
 			query = ok && info.Uses[id] == types.Universe.Lookup("nil")
 		}
@@ -438,6 +475,8 @@ func checkTransactionNode(node, body ast.Node, tx transaction, info *types.Info,
 	})
 }
 
+// isRPC 判断 fn 是否是外部 RPC 调用：net/http 客户端请求、grpc Invoke/NewStream，
+// 或以 grpc.CallOption 为变长参数的方法。
 func isRPC(fn *types.Func) bool {
 	path, name := fn.Pkg().Path(), fn.Name()
 	if path == "net/http" && (name == "Do" || name == "Get" || name == "Post" || name == "PostForm" || name == "Head") {
@@ -470,6 +509,7 @@ func isRPC(fn *types.Func) bool {
 	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "google.golang.org/grpc" && named.Obj().Name() == "CallOption"
 }
 
+// isTimerChannel 判断 expr 是否是 time.After 的返回值，或 Timer/Ticker 的 C 通道。
 func isTimerChannel(expr ast.Expr, info *types.Info) bool {
 	switch e := ast.Unparen(expr).(type) {
 	case *ast.CallExpr:
@@ -493,6 +533,7 @@ func isTimerChannel(expr ast.Expr, info *types.Info) bool {
 	return false
 }
 
+// resultDiscarded 判断 call 的结果是否被丢弃：作为独立语句，或赋值给 _。
 func resultDiscarded(node ast.Node, call *ast.CallExpr) bool {
 	switch n := node.(type) {
 	case *ast.ExprStmt:
@@ -507,6 +548,8 @@ func resultDiscarded(node ast.Node, call *ast.CallExpr) bool {
 	return false
 }
 
+// resultChecked 判断写操作 call 的错误是否被检查：
+// gorm 看 .Error 或结果变量的 Error 是否在后续被比较或返回，database/sql 看第二个返回值。
 func resultChecked(node, body ast.Node, call *ast.CallExpr, gorm bool, info *types.Info) bool {
 	if gorm {
 		var errorField *ast.SelectorExpr
@@ -555,6 +598,8 @@ func resultChecked(node, body ast.Node, call *ast.CallExpr, gorm bool, info *typ
 	return errorUsed(body, objectOf(id, info), nil, assign.End(), info)
 }
 
+// errorUsed 判断 after 之后 body 中是否有比较表达式或 return 使用了 errObj，
+// 或使用了 resultObj 的 Error 字段。
 func errorUsed(body ast.Node, errObj, resultObj types.Object, after token.Pos, info *types.Info) bool {
 	matches := func(node ast.Node) bool {
 		found := false

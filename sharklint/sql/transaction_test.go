@@ -9,6 +9,7 @@ import (
 	sharklint_sql "github.com/xcodego/shark/sharklint/sql"
 )
 
+// TestTransactionLint 验证事务检查：Rollback/提交遗漏、嵌套、RPC、等待、非事务连接和错误检查。
 func TestTransactionLint(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "go.mod"), `module example.com/transactions
@@ -250,6 +251,7 @@ func ignored(db *sql.DB) error {
 	}
 }
 
+// TestTransactionRealDependencies 用真实 gorm 与 grpc 依赖的 testdata 验证事务检查。
 func TestTransactionRealDependencies(t *testing.T) {
 	err := sharklint_sql.Lint(filepath.Join("testdata", "real"))
 	if err == nil || strings.Contains(err.Error(), "加载 Go 包失败") {

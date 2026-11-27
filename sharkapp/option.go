@@ -45,7 +45,7 @@ type Options struct {
 	etcd          *sharketcd.Config       // etcd 配置
 	http          int                     // HTTP 端口
 	rsaPrivateKey *rsa.PrivateKey         // RSA 私钥，用于解密配置中的密码
-	antpool       int                     // ants 池大小，默认 100
+	antpool       int                     // ants 池大小；<= 0 时使用无容量上限的池（配置文件与 WithXxx 均不设置，默认为 0）
 	kafkalog      bool                    // 是否启用 Kafka 日志
 }
 
@@ -283,12 +283,12 @@ func readSlices(v *viper.Viper, key string) []string {
 	return result
 }
 
-// NewOption 从默认配置文件加载选项，不解密密码。
+// NewOption 从默认配置文件 ./config/config.yaml 加载选项，不解密密码。
 func NewOption(project string, name string) (*Options, error) {
 	return NewOptionWithRsaAndConfigFile(project, name, "", "")
 }
 
-// NewOptionWithConfigFile 从指定 YAML 文件加载选项，不解密密码。
+// NewOptionWithConfigFile 从指定配置文件加载选项，不解密密码。
 func NewOptionWithConfigFile(project string, name string, configFile string) (*Options, error) {
 	v := viper.New()
 	v.SetConfigFile(configFile)
@@ -306,8 +306,8 @@ func NewOptionWithConfigFile(project string, name string, configFile string) (*O
 }
 
 // NewOptionWithRsaAndConfigFile 从 YAML 文件加载选项，并可用 RSA 私钥解密密码。
-// configFile 为空时使用 ./config/config.yaml；文件不存在时使用默认值和环境变量。
-// rsa 必须是 PKCS#1 或 PKCS#8 PEM 格式；解析失败会 panic。
+// configFile 为空时使用 ./config/config.yaml；指定的文件不存在或无法读取时返回 error。
+// rsa 为空表示不解密密码；非空时必须是 PKCS#1 或 PKCS#8 PEM 格式，解析失败会 panic。
 func NewOptionWithRsaAndConfigFile(project string, name string, rsa string, configFile string) (*Options, error) {
 	if project == "" {
 		return nil, fmt.Errorf("project required")
@@ -356,12 +356,12 @@ func NewOptionWithRsaAndConfigFile(project string, name string, rsa string, conf
 		opts.rsaPrivateKey = k
 	}
 
-	// 校验端口范围。
+	// 端口取值非法时直接返回错误。
 	if err := opts.validatePorts(); err != nil {
 		return nil, err
 	}
 
-	// 解析中间件配置并解密密码。
+	// 解析各中间件配置；未配置 host 的中间件保持 nil，密码按需解密。
 	opts.parseRedisCluster(v)
 	opts.parseRedisClient(v)
 	opts.parseRedis(v)

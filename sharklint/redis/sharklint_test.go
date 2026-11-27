@@ -11,6 +11,7 @@ import (
 	sharklint_redis "github.com/xcodego/shark/sharklint/redis"
 )
 
+// writeFile 创建 path 的父目录并写入 content。
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -21,6 +22,7 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// TestOtherRedisClients 验证其他 Redis 客户端库的禁用命令识别，以及无关同名方法不被误报。
 func TestOtherRedisClients(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -211,6 +213,8 @@ func TestOtherRedisClients(t *testing.T) {
 		})
 	}
 }
+
+// fixture 创建带本地 go-redis 桩模块的临时模块目录，供各用例写入待检查的源码。
 func fixture(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -232,6 +236,7 @@ func NewCmd(context.Context, ...any) {}
 	return dir
 }
 
+// TestLint 验证 Lint 的基本行为：报告禁用命令、忽略测试文件，并支持豁免注释。
 func TestLint(t *testing.T) {
 	dir := fixture(t)
 	writeFile(t, filepath.Join(dir, "main.go"), `package example
@@ -286,6 +291,7 @@ func ignored(c *r.Client) { c.Keys(context.Background(), "*") }
 	}
 }
 
+// TestLintErrors 验证加载失败、目录不存在、非目录和空目录的处理。
 func TestLintErrors(t *testing.T) {
 	dir := fixture(t)
 	writeFile(t, filepath.Join(dir, "broken.go"), "package example\nfunc broken( {\n")
@@ -304,6 +310,7 @@ func TestLintErrors(t *testing.T) {
 	}
 }
 
+// TestRealRedisTypes 用真实 go-redis 类型的 testdata 验证 KEYS 命令的识别。
 func TestRealRedisTypes(t *testing.T) {
 	err := sharklint_redis.Lint(filepath.Join("testdata", "real"))
 	if err == nil {

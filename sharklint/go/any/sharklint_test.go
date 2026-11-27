@@ -11,6 +11,7 @@ import (
 	"github.com/xcodego/shark/sharklint/go/any"
 )
 
+// writeFile 创建 path 的父目录并写入 content, 供测试构造源码文件。
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -21,6 +22,7 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// TestLint 验证空接口的报告范围: 跳过测试文件, 包含被构建标签排除的文件。
 func TestLint(t *testing.T) {
 	dir := t.TempDir()
 	source := `package example
@@ -65,6 +67,7 @@ type AlsoIgnored interface{}
 	}
 }
 
+// TestForceIgnoreComment 验证只有 any 豁免注释能豁免空接口。
 func TestForceIgnoreComment(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "types.go"), `package example
@@ -81,6 +84,7 @@ var reported interface{}
 	}
 }
 
+// TestLintErrors 验证解析错误、目录不存在和非目录的错误报告。
 func TestLintErrors(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "broken.go"), "package example\nfunc broken( {\n")

@@ -14,18 +14,22 @@ import (
 	"strings"
 )
 
+// forceIgnorePattern 匹配 "force ignore sharklint: panic" 豁免标记。
 var forceIgnorePattern = regexp.MustCompile(`force[ \t]+ignore[ \t]+sharklint[ \t]*:[ \t]*panic\b`)
 
 // Violation 表示一处直接调用内置 panic 的位置。
 type Violation struct {
+	// Position 是 panic 调用表达式的位置。
 	Position token.Position
 }
 
+// Error 返回带位置信息的违规描述。
 func (v Violation) Error() string {
 	return fmt.Sprintf("%s: 禁止直接调用 panic", v.Position)
 }
 
 // Lint 递归检查 dir 中所有非测试 .go 文件，不跟随符号链接。
+// 位于 main 包 main 函数体内的 panic 调用被允许; 其他调用可在上一行用 force ignore 注释豁免。
 func Lint(dir string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
@@ -79,6 +83,7 @@ func Lint(dir string) error {
 	return errors.Join(errs...)
 }
 
+// isMainFunction 判断 position 是否位于 main 包的 main 函数（非方法）体内。
 func isMainFunction(file *ast.File, position token.Pos) bool {
 	if file.Name.Name != "main" {
 		return false
@@ -93,6 +98,7 @@ func isMainFunction(file *ast.File, position token.Pos) bool {
 	return false
 }
 
+// hasForceIgnoreComment 判断 panic 调用所在行的上一行是否以豁免注释结尾。
 func hasForceIgnoreComment(file *ast.File, fset *token.FileSet, callLine int) bool {
 	for _, group := range file.Comments {
 		if fset.PositionFor(group.End(), false).Line == callLine-1 &&

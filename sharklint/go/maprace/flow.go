@@ -9,6 +9,9 @@ import (
 	"golang.org/x/tools/go/cfg"
 )
 
+// collect 收集 body 内（不进入嵌套函数字面量）对 map 的读写访问及其访问时持有的锁。
+// 先对控制流图做前向数据流分析, 求出每个基本块入口处一定持有的锁集合
+// （汇合点取交集, 独占锁遇到读锁降级）, 再逐节点记录访问。
 func collect(body *ast.BlockStmt, info *types.Info) []access {
 	writes := make(map[*ast.IndexExpr]bool)
 	ranges := make(map[token.Pos]bool)
@@ -91,6 +94,7 @@ func collect(body *ast.BlockStmt, info *types.Info) []access {
 	return result
 }
 
+// addAccess 当 expr 是可定位到变量的 map 时, 追加一条访问记录。
 func addAccess(out []access, expr ast.Expr, write bool, locks lockset, info *types.Info) []access {
 	t := info.TypeOf(expr)
 	if t == nil {
@@ -106,6 +110,8 @@ func addAccess(out []access, expr ast.Expr, write bool, locks lockset, info *typ
 	return append(out, access{key: key, root: root, pos: expr.Pos(), write: write, locks: cloneLocks(locks)})
 }
 
+// objectKey 为由标识符、字段选择和解引用组成的表达式生成稳定标识, 并返回最左侧的变量;
+// 无法定位到变量（如函数调用结果）时返回空值。
 func objectKey(expr ast.Expr, info *types.Info) (string, types.Object) {
 	switch expr := ast.Unparen(expr).(type) {
 	case *ast.Ident:
@@ -125,6 +131,8 @@ func objectKey(expr ast.Expr, info *types.Info) (string, types.Object) {
 	return "", nil
 }
 
+// updateLock 在 node 是 sync.Mutex/RWMutex 的 Lock、RLock、Unlock、RUnlock 语句时更新 state。
+// defer 与其他形式的调用不在此处理。
 func updateLock(node ast.Node, state lockset, info *types.Info) {
 	stmt, ok := node.(*ast.ExprStmt)
 	if !ok {
@@ -165,6 +173,7 @@ func updateLock(node ast.Node, state lockset, info *types.Info) {
 	}
 }
 
+// cloneLocks 返回 in 的副本。
 func cloneLocks(in lockset) lockset {
 	out := make(lockset, len(in))
 	for key, exclusive := range in {
@@ -173,6 +182,8 @@ func cloneLocks(in lockset) lockset {
 	return out
 }
 
+// mergeLocks 把 incoming 汇入 old: 只保留双方都持有的锁, 强度取较弱者;
+// 返回合并结果及是否相对 old 发生变化。old 为 nil 表示首次到达该块。
 func mergeLocks(old, incoming lockset) (lockset, bool) {
 	if old == nil {
 		return cloneLocks(incoming), true

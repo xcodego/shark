@@ -7,6 +7,8 @@ import (
 	"go/types"
 )
 
+// waitGroupEscapes 判断 body 中的 WaitGroup 是否会以本检查无法分析的方式使用:
+// 作为参数传出、被非 go 启动的闭包引用、Add 的参数不是范围内的常量, 或 worker 内的用法不受支持。
 func waitGroupEscapes(body *ast.BlockStmt, obj object, info *types.Info) bool {
 	escapes := false
 	workers := make(map[*ast.CallExpr]bool)
@@ -59,6 +61,8 @@ func waitGroupEscapes(body *ast.BlockStmt, obj object, info *types.Info) bool {
 	return escapes
 }
 
+// workerEscapes 判断 worker 闭包体内对 WaitGroup 的使用是否不受支持:
+// 在其中再启动引用它的闭包, 或在 worker 内增加计数（Add 正数或非常量）。
 func workerEscapes(body *ast.BlockStmt, obj object, info *types.Info) bool {
 	if waitGroupEscapes(body, obj, info) {
 		return true
@@ -83,6 +87,7 @@ func workerEscapes(body *ast.BlockStmt, obj object, info *types.Info) bool {
 	return unsupported
 }
 
+// references 判断 body 中是否引用了 obj 的根变量。
 func references(body *ast.BlockStmt, obj object, info *types.Info) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -94,7 +99,9 @@ func references(body *ast.BlockStmt, obj object, info *types.Info) bool {
 	return found
 }
 
-// applyWorker counts completions on each reachable exit of a direct worker.
+// applyWorker 统计直接启动的 worker 闭包在每个可达退出路径上对 WaitGroup 的完成次数
+// （Done 与负数常量 Add, 含 defer）, 并从 s 中扣除, 返回各路径对应的后继状态;
+// 某条路径完成次数超过未完成的 Add 时报告未配对的释放。
 func applyWorker(s state, lit *ast.FuncLit, obj object, info *types.Info, report func(token.Pos, string)) []state {
 	g := graph(lit.Body, info)
 	type item struct {
@@ -164,7 +171,7 @@ func applyWorker(s state, lit *ast.FuncLit, obj object, info *types.Info, report
 	for result := range results {
 		out = append(out, result)
 	}
-	// A worker that never exits cannot discharge its registration.
+	// worker 永不退出时无法抵消登记, 保持原状态。
 	if len(out) == 0 {
 		return []state{s}
 	}

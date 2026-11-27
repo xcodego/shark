@@ -16,18 +16,18 @@ import (
 	"github.com/elastic/go-elasticsearch/v9"
 	"github.com/elastic/go-elasticsearch/v9/esapi"
 	"github.com/tidwall/gjson"
-	"github.com/xcodego/shark/sharkeswhere"
 	"github.com/xuri/excelize/v2"
 )
 
-// SharkElastic 封装 Elasticsearch 客户端及索引、查询辅助方法。
+// Client 封装 Elasticsearch 客户端及索引、查询辅助方法。请使用 New 创建。
 type Client struct {
 	Elastic *elasticsearch.Client
 }
 
-// MappingType 定义 Elasticsearch 字段类型常量
+// MappingType 是 Elasticsearch 字段类型。
 type MappingType string
 
+// 常用的 Elasticsearch 字段类型。
 const (
 	MappingTypeText    MappingType = "text"
 	MappingTypeKeyword MappingType = "keyword"
@@ -42,32 +42,26 @@ const (
 	MappingTypeNested  MappingType = "nested"
 )
 
-// FieldMapping 定义索引字段映射
+// FieldMapping 描述索引中的一个字段映射。
 type FieldMapping struct {
 	Name   string
 	Type   MappingType
 	Format string // 可选，字段格式，例如 date 类型的 "yyyy-MM-dd" 或 "yyyy-MM-dd HH:mm:ss"
 }
 
-// CreateIndex 创建索引，可指定分片数和字段映射
-// index: 索引名称
-// shards: 主分片数量（<=0 时使用 ES 默认值）
-// mappings: 可变参数，字段映射列表；不传则只创建索引不带 mapping
+// CreateIndex 创建索引，可指定分片数和字段映射。
+// shards <= 0 时使用 ES 默认值；不传 mappings 则只创建索引，由 ES 动态推断字段。
 //
 // 使用示例:
 //
-//	// 创建索引并指定分片数和映射
 //	err := client.CreateIndex(ctx, "users", 2,
 //	    sharkelastic.FieldMapping{Name: "name", Type: sharkelastic.MappingTypeText},
 //	    sharkelastic.FieldMapping{Name: "age", Type: sharkelastic.MappingTypeInteger},
 //	    sharkelastic.FieldMapping{Name: "email", Type: sharkelastic.MappingTypeKeyword},
 //	)
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
 //
-//	// 创建索引不指定映射（分片数 1）
-//	err := client.CreateIndex(ctx, "orders", 1)
+//	// 不指定映射
+//	err = client.CreateIndex(ctx, "orders", 1)
 func (s *Client) CreateIndex(ctx context.Context, index string, shards int, mappings ...FieldMapping) error {
 	if index == "" {
 		return fmt.Errorf("索引名称不能为空")
@@ -121,10 +115,8 @@ func (s *Client) CreateIndex(ctx context.Context, index string, shards int, mapp
 	return nil
 }
 
-// CreateIndexStrict 创建严格模式的索引，不可以动态添加未定义的字段
-// index: 索引名称
-// shards: 主分片数量（<=0 时使用 ES 默认值）
-// mappings: 可变参数，字段映射列表
+// CreateIndexStrict 创建严格模式（dynamic: strict）的索引，写入未在 mappings 中定义的字段会被 ES 拒绝。
+// shards <= 0 时使用 ES 默认值。
 //
 // 使用示例:
 //
@@ -190,13 +182,10 @@ func (s *Client) CreateIndexStrict(ctx context.Context, index string, shards int
 	return nil
 }
 
-// SetIndexMapping 为已存在的索引添加或更新字段映射
-// index: 索引名称
-// mappings: 可变参数，要添加/更新的字段映射列表
+// SetIndexMapping 为已存在的索引添加字段映射（ES 不允许修改已有字段的类型），至少需要一个 mapping。
 //
 // 使用示例:
 //
-//	// 为已有索引添加新字段映射
 //	err := client.SetIndexMapping(ctx, "users",
 //	    sharkelastic.FieldMapping{Name: "phone", Type: sharkelastic.MappingTypeKeyword},
 //	    sharkelastic.FieldMapping{Name: "birthday", Type: sharkelastic.MappingTypeDate},
@@ -243,14 +232,10 @@ func (s *Client) SetIndexMapping(ctx context.Context, index string, mappings ...
 	return nil
 }
 
-// Search 在指定索引中执行搜索查询
-// index: 索引名称
-// query: 搜索查询参数，必须是一个非空的 map[string]any 类型，表示 Elasticsearch 查询 DSL
-// 返回原始响应字节和错误
+// Search 在指定索引中执行搜索，query 为非空的 Elasticsearch 查询 DSL，返回原始响应字节。
 //
-// 用法示例:
+// 使用示例:
 //
-//	// 构建搜索查询参数
 //	searchParams := map[string]any{
 //	    "query": map[string]any{
 //	        "match": map[string]any{
@@ -258,7 +243,6 @@ func (s *Client) SetIndexMapping(ctx context.Context, index string, mappings ...
 //	        },
 //	    },
 //	}
-//	// 执行搜索查询
 //	respBytes, err := elasticClient.Search(context.Background(), "users", searchParams)
 //	if err != nil {
 //	    log.Fatal(err)
@@ -307,11 +291,10 @@ func (s *Client) Search(ctx context.Context, index string, query map[string]any)
 	return respBytes, nil
 }
 
-// upsertBatchSize Insert/Upsert 每批处理的文档数
-// ES 官方建议每批 1000-5000 条左右，这里取 1000，平衡性能与请求体大小
+// upsertBatchSize 是 Insert/Upsert 每个 Bulk 请求包含的文档数，兼顾吞吐与请求体大小。
 const upsertBatchSize = 1000
 
-// bulkResponse Bulk API 响应结构
+// bulkResponse 是 Bulk API 响应中用于判错的子集。
 type bulkResponse struct {
 	Errors bool `json:"errors"`
 	Items  []map[string]struct {
@@ -323,7 +306,7 @@ type bulkResponse struct {
 	} `json:"items"`
 }
 
-// sendBulkRequest 发送单批 Bulk 请求并校验结果，返回 nil 表示全部成功
+// sendBulkRequest 发送单批 Bulk 请求。Bulk 即使部分失败 HTTP 状态也是 200，所以还要检查 errors 字段并汇总每条失败原因。
 func (s *Client) sendBulkRequest(ctx context.Context, buf *bytes.Buffer) error {
 	if s.Elastic == nil {
 		return fmt.Errorf("Elasticsearch 客户端未初始化")
@@ -368,22 +351,14 @@ func (s *Client) sendBulkRequest(ctx context.Context, buf *bytes.Buffer) error {
 	return nil
 }
 
-// Insert 使用 Bulk API 批量插入文档到指定索引，内部自动分批（1000条/批），外部可传入任意数量。
-// 任意一批失败则立即返回错误。
-//
-// 参数:
-//   - ctx:     上下文
-//   - index:   Elasticsearch 索引名称
-//   - idField: 文档中作为 _id 的字段名，该字段必须存在且非空
-//   - docs:    可变参数，一个或多个待插入文档（any 类型）
+// Insert 使用 Bulk API 批量写入文档（index 动作：_id 已存在时整体覆盖），内部按 1000 条一批自动分批。
+// idField 是文档中作为 _id 的字段名，必须存在且非空。任意一批失败即返回错误，之前的批次不回滚。
 //
 // 使用示例:
 //
-//	// 批量插入 - 可传入任意数量，内部自动分批
 //	docs := []any{
 //	    map[string]any{"user_id": "1", "name": "张三", "age": 25},
 //	    map[string]any{"user_id": "2", "name": "李四", "age": 30},
-//	    // ... 可传入数千条
 //	}
 //	if err := client.Insert(ctx, "users", "user_id", docs...); err != nil {
 //	    log.Fatal(err)
@@ -399,7 +374,6 @@ func (s *Client) Insert(ctx context.Context, index string, idField string, docs 
 		return fmt.Errorf("至少需要提供一个文档")
 	}
 
-	// 分批处理
 	for start := 0; start < len(docs); start += upsertBatchSize {
 		end := start + upsertBatchSize
 		if end > len(docs) {
@@ -407,7 +381,7 @@ func (s *Client) Insert(ctx context.Context, index string, idField string, docs 
 		}
 		batch := docs[start:end]
 
-		// 构建这一批的 NDJSON
+		// Bulk 请求体为 NDJSON：每个文档先写 action 行，再写数据行
 		var buf bytes.Buffer
 		for i, doc := range batch {
 			docBytes, err := sonic.Marshal(doc)
@@ -449,22 +423,14 @@ func (s *Client) Insert(ctx context.Context, index string, idField string, docs 
 	return nil
 }
 
-// Upsert 使用 Bulk API 批量 upsert 文档（不存在则插入，存在则局部更新），内部自动分批（1000条/批），外部可传入任意数量。
-// 任意一批失败则立即返回错误。
-//
-// 参数:
-//   - ctx:     上下文
-//   - index:   Elasticsearch 索引名称
-//   - idField: 文档中作为 _id 的字段名，该字段必须存在且非空
-//   - docs:    可变参数，一个或多个待 upsert 文档（any 类型）
+// Upsert 使用 Bulk API 批量 upsert 文档（不存在则插入，存在则局部更新），内部按 1000 条一批自动分批。
+// idField 是文档中作为 _id 的字段名，必须存在且非空。任意一批失败即返回错误，之前的批次不回滚。
 //
 // 使用示例:
 //
-//	// 批量 upsert - 可传入任意数量，内部自动分批
 //	docs := []any{
 //	    map[string]any{"user_id": "1", "name": "张三"},
 //	    map[string]any{"user_id": "2", "name": "李四"},
-//	    // ... 可传入数千条
 //	}
 //	if err := client.Upsert(ctx, "users", "user_id", docs...); err != nil {
 //	    log.Fatal(err)
@@ -480,7 +446,6 @@ func (s *Client) Upsert(ctx context.Context, index string, idField string, docs 
 		return fmt.Errorf("至少需要提供一个文档")
 	}
 
-	// 分批处理
 	for start := 0; start < len(docs); start += upsertBatchSize {
 		end := start + upsertBatchSize
 		if end > len(docs) {
@@ -488,7 +453,7 @@ func (s *Client) Upsert(ctx context.Context, index string, idField string, docs 
 		}
 		batch := docs[start:end]
 
-		// 构建这一批的 NDJSON
+		// Bulk 请求体为 NDJSON：每个文档先写 action 行，再写数据行
 		var buf bytes.Buffer
 		for i, doc := range batch {
 			docBytes, err := sonic.Marshal(doc)
@@ -535,8 +500,8 @@ func (s *Client) Upsert(ctx context.Context, index string, idField string, docs 
 	return nil
 }
 
-// DeleteById 使用 Bulk API 批量删除指定 ID 的文档。
-// 任意一条删除失败则整体返回汇总错误信息，全部成功返回 nil。
+// DeleteById 使用 Bulk API 批量删除指定 ID 的文档，ids 支持字符串和各类数字（统一转为字符串 _id）。
+// 任意一条删除失败则返回汇总错误；文档不存在按 ES 返回的 not_found 状态处理，不计为错误。
 func (s *Client) DeleteById(ctx context.Context, index string, ids ...any) error {
 	if index == "" {
 		return fmt.Errorf("索引名称不能为空")
@@ -545,10 +510,8 @@ func (s *Client) DeleteById(ctx context.Context, index string, ids ...any) error
 		return fmt.Errorf("至少需要提供一个文档ID")
 	}
 
-	// 构建 Bulk 请求体的 NDJSON
 	var buf bytes.Buffer
 	for i, id := range ids {
-		// 将 ID 转为字符串
 		var idStr string
 		switch v := id.(type) {
 		case string:
@@ -574,7 +537,6 @@ func (s *Client) DeleteById(ctx context.Context, index string, ids ...any) error
 			return fmt.Errorf("第 %d 个文档ID为空", i+1)
 		}
 
-		// 写入 delete action 行
 		action := map[string]any{
 			"delete": map[string]any{
 				"_index": index,
@@ -596,21 +558,19 @@ func (s *Client) DeleteById(ctx context.Context, index string, ids ...any) error
 	return nil
 }
 
-// batchSize 游标分页每批处理的文档数
+// batchSize 是 DeleteBySql 与导出函数每次 search_after 查询的文档数。
 const batchSize = 1000
 
-// DeleteBySql 根据 SQL WHERE 条件分批删除文档，使用 search_after 游标深分页，适合百万级数据。
+// DeleteBySql 按 SQL WHERE 条件分批删除文档，用 search_after 游标深分页，适合百万级数据。
 //
-// 核心要求：SQL 必须包含 order by 子句，且排序字段组合必须保证唯一性。
-// search_after 依赖排序值作为游标，非唯一排序会导致漏删或重复删除。
-// 内部循环：search_after 游标查询(禁用 _source)→按 ID Bulk 删除→直到无结果。
+// SQL 必须包含 order by，且排序字段组合必须唯一，否则游标会导致漏删或重复删除。
+// 循环流程：search_after 查询（禁用 _source）→ 按 _id Bulk 删除 → 直到无结果。
 //
-// SQL 格式：delete from indexname where conditions order by field1 [asc|desc], field2 [asc|desc], ...
-// where 语法与 Find/SqlRaw 完全一致。
+// SQL 格式：delete from indexname where conditions order by field1 [asc|desc], ...
+// where 语法与 Find/SqlRaw 一致。
 //
 // 使用示例：
 //
-//	// 按条件+唯一排序分批删除
 //	err := client.DeleteBySql(ctx, "delete from users where status = 0 order by user_id asc")
 func (s *Client) DeleteBySql(ctx context.Context, sql string) error {
 	if strings.TrimSpace(sql) == "" {
@@ -624,7 +584,7 @@ func (s *Client) DeleteBySql(ctx context.Context, sql string) error {
 	}
 	afterDelete := strings.TrimSpace(input[6:])
 
-	pq, err := sharkeswhere.Build(afterDelete)
+	pq, err := Build(afterDelete)
 	if err != nil {
 		return fmt.Errorf("解析 SQL 失败: %w", err)
 	}
@@ -637,7 +597,7 @@ func (s *Client) DeleteBySql(ctx context.Context, sql string) error {
 		queryClause = map[string]any{"match_all": map[string]any{}}
 	}
 
-	// search_after 必须有排序字段，sort 值作为游标
+	// search_after 以排序值作为游标，必须有 order by
 	sortSpec, ok := pq.Body["sort"]
 	if !ok {
 		return fmt.Errorf("DeleteBySql 使用 search_after 游标，SQL 必须包含 order by 且排序字段必须唯一，例如: delete from users where status = 0 order by user_id asc")
@@ -675,7 +635,6 @@ func (s *Client) DeleteBySql(ctx context.Context, sql string) error {
 			ids = append(ids, id.String())
 		}
 
-		// 按 ID 批量删除
 		if err := s.DeleteById(ctx, pq.Index, ids...); err != nil {
 			return fmt.Errorf("分批删除失败: %w", err)
 		}
@@ -684,7 +643,7 @@ func (s *Client) DeleteBySql(ctx context.Context, sql string) error {
 			break
 		}
 
-		// 取最后一条的 sort 值作为下一次 search_after
+		// 以最后一条的 sort 值作为下一轮 search_after 游标
 		searchAfter = nil
 		lastSort := hitArr[len(hitArr)-1].Get("sort")
 		if lastSort.Exists() && lastSort.IsArray() {
@@ -699,26 +658,19 @@ func (s *Client) DeleteBySql(ctx context.Context, sql string) error {
 	return nil
 }
 
-// ExportExcelBySql 根据 SQL WHERE 条件使用 search_after 游标分批查询数据并导出为 Excel(.xlsx)。
-// 内部 search_after 深分页→excelize StreamWriter 流式写入，内存始终只有一批数据量，适合百万级数据。
+// ExportExcelBySql 按 SQL 条件用 search_after 游标分批查询并导出为 Excel(.xlsx)，
+// 通过 excelize StreamWriter 流式写入，内存中始终只有一批数据，适合百万级数据。
 //
-// 核心要求：SQL 必须包含 order by 子句，且排序字段组合必须保证唯一性。
-// search_after 依赖排序值作为游标，非唯一排序会导致数据遗漏或重复。
-// 因此如果排序字段不唯一（如只按 status 排序），可能导致导出数据不全。
-//
+// SQL 必须包含 from 和 order by，且排序字段组合必须唯一，否则游标会导致数据遗漏或重复。
 // SQL 格式：select field,... from indexname where conditions order by field1 [asc|desc], ...
-// where 语法与 Find/SqlRaw 完全一致，order by 必须存在。
 //
 // 参数：
-//   - ctx:    上下文，用于取消导出操作
-//   - sql:    SQL 风格查询字符串，必须包含 from 子句和 order by 子句
-//   - name:   导出文件名前缀（自动追加时间戳），文件保存在 os.TempDir()
+//   - ctx:    上下文，取消后导出中止并返回 ctx.Err()
+//   - name:   文件名前缀，自动追加时间戳，文件写入 os.TempDir()
 //   - header: Excel 表头
-//   - cb:     行数据转换函数，入参为每条文档的 JSON 原始字节，出参为每列的值切片
+//   - cb:     行转换函数，入参为单个文档的 _source JSON，返回各列的值
 //
-// 返回值：
-//   - string: 生成的文件路径
-//   - error:  导出失败时返回错误
+// 返回生成的文件名（不含目录，位于 os.TempDir() 下）。
 //
 // 使用示例：
 //
@@ -740,7 +692,7 @@ func (s *Client) ExportExcelBySql(ctx context.Context, sql string, name string, 
 		return "", fmt.Errorf("SQL 不能为空")
 	}
 
-	pq, err := sharkeswhere.Build(sql)
+	pq, err := Build(sql)
 	if err != nil {
 		return "", fmt.Errorf("解析 SQL 失败: %w", err)
 	}
@@ -753,7 +705,7 @@ func (s *Client) ExportExcelBySql(ctx context.Context, sql string, name string, 
 		queryClause = map[string]any{"match_all": map[string]any{}}
 	}
 
-	// search_after 必须有排序字段，sort 值作为游标
+	// search_after 以排序值作为游标，必须有 order by
 	sortSpec, ok := pq.Body["sort"]
 	if !ok {
 		return "", fmt.Errorf("ExportExcelBySql 使用 search_after 游标，SQL 必须包含 order by 且排序字段必须唯一，例如: select user_id,name from users where status = 1 order by user_id asc")
@@ -798,7 +750,7 @@ func (s *Client) ExportExcelBySql(ctx context.Context, sql string, name string, 
 
 		hitArr := hits.Array()
 
-		// 提取 _source 数组（使用 encoding/json.RawMessage 保留原始 JSON 对象）
+		// 用 json.RawMessage 保留每个 _source 的原始 JSON 交给 cb
 		sourcesJSON := gjson.GetBytes(respBytes, "hits.hits.#._source")
 		var docs []json.RawMessage
 		if err := json.Unmarshal([]byte(sourcesJSON.Raw), &docs); err != nil {
@@ -809,6 +761,7 @@ func (s *Client) ExportExcelBySql(ctx context.Context, sql string, name string, 
 			row := cb(doc)
 			d := make([]any, 0, len(row))
 			for _, v := range row {
+				// StyleID 49 为文本格式("@")，避免长数字被 Excel 转成科学计数法
 				d = append(d, excelize.Cell{StyleID: 49, Value: fmt.Sprint(v)})
 			}
 			cell, _ := excelize.CoordinatesToCellName(1, rowIndex+2)
@@ -822,7 +775,7 @@ func (s *Client) ExportExcelBySql(ctx context.Context, sql string, name string, 
 			break
 		}
 
-		// 取最后一条的 sort 值作为下一次 search_after
+		// 以最后一条的 sort 值作为下一轮 search_after 游标
 		searchAfter = nil
 		lastSort := hitArr[len(hitArr)-1].Get("sort")
 		if lastSort.Exists() && lastSort.IsArray() {
@@ -846,26 +799,19 @@ func (s *Client) ExportExcelBySql(ctx context.Context, sql string, name string, 
 	return fileName, nil
 }
 
-// ExportCsvBySql 根据 SQL WHERE 条件使用 search_after 游标分批查询数据并导出为 CSV(.csv)。
-// 内部 search_after 深分页→encoding/csv 流式写入，内存始终只有一批数据量，适合百万级数据。
+// ExportCsvBySql 按 SQL 条件用 search_after 游标分批查询并导出为 CSV(.csv)，
+// 通过 encoding/csv 流式写入，内存中始终只有一批数据，适合百万级数据。
 //
-// 核心要求：SQL 必须包含 order by 子句，且排序字段组合必须保证唯一性。
-// search_after 依赖排序值作为游标，非唯一排序会导致数据遗漏或重复。
-// 因此如果排序字段不唯一（如只按 status 排序），可能导致导出数据不全。
-//
+// SQL 必须包含 from 和 order by，且排序字段组合必须唯一，否则游标会导致数据遗漏或重复。
 // SQL 格式：select field,... from indexname where conditions order by field1 [asc|desc], ...
-// where 语法与 Find/SqlRaw 完全一致，order by 必须存在。
 //
 // 参数：
-//   - ctx:    上下文，用于取消导出操作
-//   - sql:    SQL 风格查询字符串，必须包含 from 子句和 order by 子句
-//   - name:   导出文件名前缀（自动追加时间戳），文件保存在 os.TempDir()
+//   - ctx:    上下文，取消后导出中止并返回 ctx.Err()
+//   - name:   文件名前缀，自动追加时间戳，文件写入 os.TempDir()
 //   - header: CSV 表头
-//   - cb:     行数据转换函数，入参为每条文档的 JSON 原始字节，出参为每列的值切片
+//   - cb:     行转换函数，入参为单个文档的 _source JSON，返回各列的值
 //
-// 返回值：
-//   - string: 生成的文件路径
-//   - error:  导出失败时返回错误
+// 返回生成的文件名（不含目录，位于 os.TempDir() 下）。
 //
 // 使用示例：
 //
@@ -887,7 +833,7 @@ func (s *Client) ExportCsvBySql(ctx context.Context, sql string, name string, he
 		return "", fmt.Errorf("SQL 不能为空")
 	}
 
-	pq, err := sharkeswhere.Build(sql)
+	pq, err := Build(sql)
 	if err != nil {
 		return "", fmt.Errorf("解析 SQL 失败: %w", err)
 	}
@@ -900,7 +846,7 @@ func (s *Client) ExportCsvBySql(ctx context.Context, sql string, name string, he
 		queryClause = map[string]any{"match_all": map[string]any{}}
 	}
 
-	// search_after 必须有排序字段，sort 值作为游标
+	// search_after 以排序值作为游标，必须有 order by
 	sortSpec, ok := pq.Body["sort"]
 	if !ok {
 		return "", fmt.Errorf("ExportCsvBySql 使用 search_after 游标，SQL 必须包含 order by 且排序字段必须唯一，例如: select user_id,name from users where status = 1 order by user_id asc")
@@ -915,7 +861,6 @@ func (s *Client) ExportCsvBySql(ctx context.Context, sql string, name string, he
 
 	csvWriter := csv.NewWriter(file)
 
-	// 写入表头
 	headerRow := make([]string, 0, len(header))
 	for _, h := range header {
 		headerRow = append(headerRow, fmt.Sprint(h))
@@ -951,7 +896,7 @@ func (s *Client) ExportCsvBySql(ctx context.Context, sql string, name string, he
 
 		hitArr := hits.Array()
 
-		// 提取 _source 数组（使用 encoding/json.RawMessage 保留原始 JSON 对象）
+		// 用 json.RawMessage 保留每个 _source 的原始 JSON 交给 cb
 		sourcesJSON := gjson.GetBytes(respBytes, "hits.hits.#._source")
 		var docs []json.RawMessage
 		if err := json.Unmarshal([]byte(sourcesJSON.Raw), &docs); err != nil {
@@ -973,7 +918,7 @@ func (s *Client) ExportCsvBySql(ctx context.Context, sql string, name string, he
 			break
 		}
 
-		// 取最后一条的 sort 值作为下一次 search_after
+		// 以最后一条的 sort 值作为下一轮 search_after 游标
 		searchAfter = nil
 		lastSort := hitArr[len(hitArr)-1].Get("sort")
 		if lastSort.Exists() && lastSort.IsArray() {
@@ -1004,7 +949,7 @@ func (s *Client) Summary(ctx context.Context, sql string, value any) error {
 		return fmt.Errorf("value 不能为 nil")
 	}
 
-	pq, err := sharkeswhere.Build(sql)
+	pq, err := Build(sql)
 	if err != nil {
 		return fmt.Errorf("构建查询失败: %w", err)
 	}
@@ -1017,15 +962,13 @@ func (s *Client) Summary(ctx context.Context, sql string, value any) error {
 		return err
 	}
 
-	// 自动检测聚合嵌套路径：
-	// 有 pipeline 时  → aggregations.all.buckets._all.<alias>.value
-	// 无 pipeline 时  → aggregations.<alias>.value
+	// 聚合结果路径：含 bucket_script 时在 aggregations.all.buckets._all.<alias>.value，
+	// 否则在 aggregations.<alias>.value
 	basePath := "aggregations"
 	if nested := gjson.GetBytes(respBytes, "aggregations.all.buckets._all"); nested.Exists() {
 		basePath = "aggregations.all.buckets._all"
 	}
 
-	// 遍历 basePath 下所有 key，提取 .value 字段构建结果 map
 	result := make(map[string]any)
 	base := gjson.GetBytes(respBytes, basePath)
 	base.ForEach(func(key, val gjson.Result) bool {
@@ -1051,13 +994,13 @@ func (s *Client) Summary(ctx context.Context, sql string, value any) error {
 	return nil
 }
 
-// SqlRaw 解析 SQL 风格查询并返回 Elasticsearch 原始响应。
+// SqlRaw 解析 SQL 风格查询并返回 Elasticsearch 完整原始响应（含 hits.total、_score 等元数据）。
 func (s *Client) SqlRaw(ctx context.Context, sql string) ([]byte, error) {
 	if strings.TrimSpace(sql) == "" {
 		return nil, fmt.Errorf("SQL 不能为空")
 	}
 
-	pq, err := sharkeswhere.Build(sql)
+	pq, err := Build(sql)
 	if err != nil {
 		return nil, err
 	}
@@ -1067,50 +1010,20 @@ func (s *Client) SqlRaw(ctx context.Context, sql string) ([]byte, error) {
 	return s.Search(ctx, pq.Index, pq.Body)
 }
 
-// Find 执行 SQL 风格查询，自动提取 _source 并反序列化到目标切片。
-//
-// 设计目的
-//
-// Find 面向简单的文档列表查询场景，提供类似 GORM Find 的开发体验。
-// 内部自动完成：SQL 解析 → ES 搜索 → 提取 hits.hits._source 数组 → JSON 反序列化到 result。
-// 不返回 total、_score 等元数据，仅返回文档内容列表。
-//
-// 与 SqlRaw 的边界
-//
-//   - Find   → 仅返回文档 _source 切片，适合"查列表"场景。result 必须是非 nil 切片指针。
-//   - SqlRaw → 返回完整 ES 响应（含 hits.total、_score、shards 等），适合需要元数据的场景。
+// Find 执行 SQL 风格查询，提取 hits.hits[]._source 并反序列化到 result，面向"查文档列表"场景。
+// 不返回 total、_score 等元数据，需要时用 SqlRaw 获取完整响应。
 //
 // SQL 格式：
 //
 //	[select field,...] from indexname where conditions [order by field [asc|desc], ...] [limit N] [offset N]
 //
-// 支持的运算符：= != > >= < <= in like and or ()、order by、limit、offset
+// 支持的运算符：= != > >= < <= in like and or ()。like 映射为 ES match 全文查询，不是 SQL 通配符。
+// 不支持 BETWEEN、IS NULL、函数调用、子查询、JOIN；聚合请使用 Summary。
 //
-// 不支持的功能及其原因：
-//
-//   - 聚合（aggregations）、分组（group by）
-//     → 聚合返回聚合桶而非文档列表，与当前文档查询模型完全不同
-//   - select 别名（如 select name as n）
-//     → ES _source 不支持字段重命名，需 script_fields 替代，但返回结构从 _source 变为 fields，
-//     且 Find() 的"反序列化到结构体"流程会完全失效
-//   - select DISTINCT
-//     → ES 无原生 distinct 查询，需 collapse（折叠）或 terms aggregation，
-//     本质是聚合去重，不再是文档查询语义
-//   - select 表达式（如 select age+1, price*0.9）
-//     → ES 需 script_fields + Painless 脚本，返回 fields 数组而非 _source，
-//     且引入脚本注入风险和性能开销
-//   - SQL 通配符 LIKE（%）、BETWEEN、IS NULL
-//     → 当前 like 映射为 ES match（全文搜索），非通配符匹配
-//   - 算术表达式、函数调用、子查询、JOIN
-//     → ES 不支持 SQL 级别的关系运算和嵌套查询
-//
-// 注意事项
-//
-//   - result 必须是指向切片的指针（如 &[]User{}），否则反序列化失败
-//   - result 对应的结构体字段需要使用 json tag 匹配 ES 文档字段名
-//   - 查询无结果时，result 指向的空切片长度为 0，不返回错误
-//   - from 子句为必填，缺少时返回错误
-//   - like 映射为 ES Match Query（全文搜索），不是 SQL 通配符
+// 注意事项：
+//   - result 必须是指向切片的指针（如 &[]User{}），结构体用 json tag 匹配文档字段名
+//   - 无结果时 result 为空切片，不返回错误
+//   - from 子句必填
 //
 // 使用示例：
 //
@@ -1120,23 +1033,9 @@ func (s *Client) SqlRaw(ctx context.Context, sql string) ([]byte, error) {
 //	    Age    int    `json:"age"`
 //	}
 //
-//	// 条件查询
 //	var users []User
 //	err := es.Find(ctx, "from users where status = 1", &users)
-//
-//	// 字段过滤 + 分页
 //	err = es.Find(ctx, "select name,age from users where age >= 18 limit 10 offset 5", &users)
-//
-//	// 无结果（users 为空切片，err 为 nil）
-//	err = es.Find(ctx, "from users where age > 200", &users)
-//
-// 参数：
-//   - ctx:    上下文
-//   - sql:    SQL 风格查询字符串，必须包含 from 子句
-//   - result: 指向切片的指针（如 &[]User{}），不能为 nil
-//
-// 返回：
-//   - error: 解析失败、缺少 from 子句、ES 请求失败或反序列化失败时返回错误
 func (s *Client) Find(ctx context.Context, sql string, result any) error {
 	if strings.TrimSpace(sql) == "" {
 		return fmt.Errorf("SQL 不能为空")
@@ -1145,8 +1044,7 @@ func (s *Client) Find(ctx context.Context, sql string, result any) error {
 		return fmt.Errorf("result 不能为 nil")
 	}
 
-	// 1. 构建查询 DSL
-	pq, err := sharkeswhere.Build(sql)
+	pq, err := Build(sql)
 	if err != nil {
 		return fmt.Errorf("构建查询失败: %w", err)
 	}
@@ -1154,19 +1052,16 @@ func (s *Client) Find(ctx context.Context, sql string, result any) error {
 		return fmt.Errorf("SQL 缺少 from 子句指定索引")
 	}
 
-	// 2. 执行搜索
 	respBytes, err := s.Search(ctx, pq.Index, pq.Body)
 	if err != nil {
 		return err
 	}
 
-	// 3. 解析 ES 响应：提取 hits.hits[]._source 数组
 	sourcesJSON := gjson.GetBytes(respBytes, "hits.hits.#._source")
 	if !sourcesJSON.Exists() {
 		return fmt.Errorf("解析 ES 响应失败: 未找到 hits.hits")
 	}
 
-	// 将 JSON 数组反序列化到 result
 	if err := sonic.Unmarshal([]byte(sourcesJSON.Raw), result); err != nil {
 		return fmt.Errorf("反序列化结果失败: %w", err)
 	}
@@ -1174,7 +1069,9 @@ func (s *Client) Find(ctx context.Context, sql string, result any) error {
 	return nil
 }
 
-// Page 执行分页 SQL 风格查询，将结果解码到 result 并返回总数。
+// Page 执行分页 SQL 风格查询，将 _source 列表解码到 result 并返回命中总数。
+// page 从 1 开始（<1 按 1），pageSize <1 按 10；会覆盖 SQL 中的 limit/offset。
+// 总数取自 hits.total.value，ES 默认最多精确计数到 1 万。
 func (s *Client) Page(ctx context.Context, sql string, page int, pageSize int, result any) (int64, error) {
 	if strings.TrimSpace(sql) == "" {
 		return 0, fmt.Errorf("SQL 不能为空")
@@ -1189,8 +1086,7 @@ func (s *Client) Page(ctx context.Context, sql string, page int, pageSize int, r
 		pageSize = 10
 	}
 
-	// 1. 构建查询 DSL
-	pq, err := sharkeswhere.Build(sql)
+	pq, err := Build(sql)
 	if err != nil {
 		return 0, fmt.Errorf("构建查询失败: %w", err)
 	}
@@ -1198,24 +1094,20 @@ func (s *Client) Page(ctx context.Context, sql string, page int, pageSize int, r
 		return 0, fmt.Errorf("SQL 缺少 from 子句指定索引")
 	}
 
-	// 2. 覆盖分页参数
 	pq.Body["size"] = pageSize
 	pq.Body["from"] = (page - 1) * pageSize
 
-	// 3. 执行搜索
 	respBytes, err := s.Search(ctx, pq.Index, pq.Body)
 	if err != nil {
 		return 0, err
 	}
 
-	// 4. 解析 total
 	totalResult := gjson.GetBytes(respBytes, "hits.total.value")
 	if !totalResult.Exists() {
 		return 0, fmt.Errorf("解析 ES 响应失败: 未找到 hits.total.value")
 	}
 	total := totalResult.Int()
 
-	// 5. 解析 ES 响应：提取 hits.hits[]._source 数组并反序列化到 result
 	sourcesJSON := gjson.GetBytes(respBytes, "hits.hits.#._source")
 	if sourcesJSON.Exists() {
 		if err := sonic.Unmarshal([]byte(sourcesJSON.Raw), result); err != nil {

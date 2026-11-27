@@ -10,6 +10,7 @@ import (
 	"github.com/xcodego/shark/sharklint/swagger"
 )
 
+// writeFile 创建 path 的父目录并写入 content。
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -20,6 +21,7 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// newFixture 创建带本地 gin 桩模块的临时模块目录，并把 source 写入 main.go，返回目录路径。
 func newFixture(t *testing.T, source string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -52,6 +54,7 @@ func (*RouterGroup) Handle(string, string, ...HandlerFunc) {}
 	return dir
 }
 
+// TestLintAcceptsMatchingGinRouteAndSchemas 验证文档完整且与路由一致的 Gin POST 路由（含 Group 前缀与 @BasePath）通过检查。
 func TestLintAcceptsMatchingGinRouteAndSchemas(t *testing.T) {
 	dir := newFixture(t, `package main
 import (
@@ -87,6 +90,7 @@ func routes(router *gin.Engine) {
 	}
 }
 
+// TestLintAllowsEmptyParamAndSuccessStructs 验证 body 与 @Success 可使用空的 struct{}。
 func TestLintAllowsEmptyParamAndSuccessStructs(t *testing.T) {
 	dir := newFixture(t, `package main
 import "github.com/gin-gonic/gin"
@@ -108,6 +112,7 @@ func routes(router *gin.Engine) {
 	}
 }
 
+// TestLintRequiresCommentsOnEmbeddedStructFields 验证递归检查内嵌结构体中缺少注释的字段。
 func TestLintRequiresCommentsOnEmbeddedStructFields(t *testing.T) {
 	dir := newFixture(t, `package main
 import "github.com/gin-gonic/gin"
@@ -139,6 +144,7 @@ func routes(router *gin.Engine) {
 	}
 }
 
+// TestLintRecursesIntoImportedNestedStructs 验证递归检查被导入包中嵌套结构体的字段注释。
 func TestLintRecursesIntoImportedNestedStructs(t *testing.T) {
 	dir := newFixture(t, `package main
 import (
@@ -181,6 +187,7 @@ type Outer struct {
 	}
 }
 
+// TestLintResolvesImportedRequestAndResponseTypes 验证 @Param 与 @Success 能解析 pkg.Type 形式的导入类型。
 func TestLintResolvesImportedRequestAndResponseTypes(t *testing.T) {
 	dir := newFixture(t, `package main
 import (
@@ -215,6 +222,7 @@ type NextRoundResp struct {
 	}
 }
 
+// TestLintAllowsSharkErrorsAlongsideSuccessResponses 验证 sharkerror.Error 响应不参与成功响应类型的比较。
 func TestLintAllowsSharkErrorsAlongsideSuccessResponses(t *testing.T) {
 	dir := newFixture(t, `package main
 import (
@@ -263,6 +271,7 @@ type Error struct {
 	}
 }
 
+// TestLintSupportsGinHandleMatchAndNetHTTPMux 验证 Gin Handle、Match 与 net/http ServeMux 路由的识别。
 func TestLintSupportsGinHandleMatchAndNetHTTPMux(t *testing.T) {
 	dir := newFixture(t, `package main
 import (
@@ -305,6 +314,7 @@ func routes(router *gin.Engine, mux *http.ServeMux) {
 	}
 }
 
+// TestLintReportsRouteAndSwaggerMismatches 验证路径、@Success 与请求绑定类型不一致时的违规报告。
 func TestLintReportsRouteAndSwaggerMismatches(t *testing.T) {
 	dir := newFixture(t, `package main
 import "github.com/gin-gonic/gin"
@@ -374,6 +384,7 @@ func routes(router *gin.Engine) {
 	}
 }
 
+// TestLintChecksPathParamsAndOrphanDocs 验证路径参数与 @Param 的对应关系，以及没有实际路由的 POST 文档。
 func TestLintChecksPathParamsAndOrphanDocs(t *testing.T) {
 	dir := newFixture(t, `package main
 import "github.com/gin-gonic/gin"
@@ -406,6 +417,7 @@ func routes(router *gin.Engine) {
 	}
 }
 
+// TestLintIgnoresNonRoutersAndSupportsForceIgnore 验证非 Gin 同名方法不被识别为路由，并支持豁免注释。
 func TestLintIgnoresNonRoutersAndSupportsForceIgnore(t *testing.T) {
 	dir := newFixture(t, `package main
 type unrelated struct{}
@@ -441,6 +453,7 @@ func routes(router *gin.Engine) {
 	}
 }
 
+// TestLintErrors 验证空目录、目录不存在和包解析失败的处理。
 func TestLintErrors(t *testing.T) {
 	dir := t.TempDir()
 	if err := swagger.Lint(dir); err != nil {

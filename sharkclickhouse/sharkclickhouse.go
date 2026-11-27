@@ -1,4 +1,4 @@
-// Package sharkclickhouse 提供 ClickHouse 原生客户端连接。
+// Package sharkclickhouse 提供 ClickHouse 原生协议客户端连接。
 package sharkclickhouse
 
 import (
@@ -13,15 +13,15 @@ import (
 
 // Config 是 ClickHouse 原生协议的连接配置。
 type Config struct {
-	Host     []string `json:"host" yaml:"host" mapstructure:"host"`
-	User     string   `json:"user" yaml:"user" mapstructure:"user"`
-	Password string   `json:"password" yaml:"password" mapstructure:"password"`
-	Database string   `json:"database" yaml:"database" mapstructure:"database"`
-	TLS      bool     `json:"tls" yaml:"tls" mapstructure:"tls"`
+	Host     []string `json:"host" yaml:"host" mapstructure:"host"`             // 节点地址列表，格式为 host:port
+	User     string   `json:"user" yaml:"user" mapstructure:"user"`             // 用户名
+	Password string   `json:"password" yaml:"password" mapstructure:"password"` // 密码
+	Database string   `json:"database" yaml:"database" mapstructure:"database"` // 默认数据库
+	TLS      bool     `json:"tls" yaml:"tls" mapstructure:"tls"`                // 是否启用 TLS
 }
 
-// New 创建客户端并使用 ctx 验证连接。Host 使用原生协议地址，例如 localhost:9000。
-// 调用方在不再使用客户端时应调用 Client.Close。
+// New 创建客户端并用 ctx 做 Ping 验证连接；Host 为原生协议地址（如 localhost:9000），多个地址由驱动负责选择，不能为空。
+// TLS 最低 TLS 1.2。Ping 失败时会关闭连接；成功后调用方不再使用时应调用 Close。
 func New(ctx context.Context, config *Config) (driver.Conn, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config required")

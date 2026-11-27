@@ -11,6 +11,7 @@ import (
 	"github.com/xcodego/shark/sharklint/go/syncpair"
 )
 
+// TestPairs 按源码中的行尾标记逐行校验锁与 WaitGroup 配对问题的报告与不报告。
 func TestPairs(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "go.mod"), "module example.com/test\n\ngo 1.26\n")
@@ -206,6 +207,7 @@ func unrelated() { var x other; x.Lock() }
 	}
 }
 
+// TestSafeGo 验证 sharkapp.SafeGo 启动的闭包与 go 语句同样被分析。
 func TestSafeGo(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "go.mod"), "module github.com/xcodego/shark\n\ngo 1.26\n")
@@ -228,6 +230,7 @@ func run(app *sharkapp.App, b bool) {
 	}
 }
 
+// TestErrors 验证空目录通过, 以及目录不存在和包加载错误的报告。
 func TestErrors(t *testing.T) {
 	dir := t.TempDir()
 	if err := syncpair.Lint(dir); err != nil {
@@ -243,6 +246,7 @@ func TestErrors(t *testing.T) {
 	}
 }
 
+// write 把 text 写入 path。
 func write(t *testing.T, path, text string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(text), 0644); err != nil {

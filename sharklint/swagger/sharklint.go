@@ -1,4 +1,4 @@
-// Package swagger checks that HTTP routes and their Swagger annotations agree.
+// Package swagger 检查 POST 路由（Gin 与 net/http）与其 handler 上 Swagger 注解的一致性。
 package swagger
 
 import (
@@ -21,50 +21,66 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
+// forceIgnorePattern 匹配“force ignore sharklint: swagger”豁免注释；
+// 该注释须单独位于被豁免路由注册语句、handler 声明或违规位置的上一行。
 var forceIgnorePattern = regexp.MustCompile(`force[ \t]+ignore[ \t]+sharklint[ \t]*:[ \t]*swagger\b`)
+
+// 以下三个正则分别解析 @Router、@Param、@Success 注解行。
 var routerPattern = regexp.MustCompile(`^@Router[ \t]+([^ \t]+)[ \t]+\[([A-Za-z]+)\]`)
 var paramPattern = regexp.MustCompile(`^@Param[ \t]+([^ \t]+)[ \t]+([^ \t]+)[ \t]+([^ \t]+)[ \t]+([^ \t]+)[ \t]+"([^"]+)"`)
 var successPattern = regexp.MustCompile(`^@Success[ \t]+([0-9]{3})[ \t]+\{([^}]+)\}[ \t]+([^ \t]+)`)
 
+// httpMethods 是 Gin Any 注册的全部 HTTP 方法。
 var httpMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"}
 
 // Violation 表示一处路由或 Swagger 注释不匹配。
 type Violation struct {
+	// Position 是违规代码的位置。
 	Position token.Position
-	Message  string
+	// Message 是违规说明。
+	Message string
 }
 
+// Error 实现 error 接口，格式为“位置: 说明”。
 func (v Violation) Error() string {
 	return fmt.Sprintf("%s: %s", v.Position, v.Message)
 }
 
+// sourceFile 是一个被检查的源文件及其所属包。
 type sourceFile struct {
 	pkg  *packages.Package
 	file *ast.File
 }
 
+// functionDoc 是从函数文档注释中解析出的 Swagger 注解。
 type functionDoc struct {
-	source     sourceFile
-	decl       *ast.FuncDecl
-	summary    bool
-	routers    []routerDoc
-	params     []paramDoc
-	successes  []successDoc
-	issues     []docIssue
+	source sourceFile
+	decl   *ast.FuncDecl
+	// summary 表示存在非空 @Summary。
+	summary   bool
+	routers   []routerDoc
+	params    []paramDoc
+	successes []successDoc
+	// issues 是注解格式错误，仅在函数是 POST handler 或带 POST @Router 时才报告。
+	issues []docIssue
+	// hasPostDoc 表示带有 method 为 POST 的 @Router。
 	hasPostDoc bool
 }
 
+// docIssue 是注解解析阶段发现的格式问题。
 type docIssue struct {
 	position token.Pos
 	message  string
 }
 
+// routerDoc 对应一条 @Router 注解。
 type routerDoc struct {
 	path     string
 	method   string
 	position token.Pos
 }
 
+// paramDoc 对应一条 @Param 注解。
 type paramDoc struct {
 	name     string
 	location string
@@ -73,28 +89,35 @@ type paramDoc struct {
 	position token.Pos
 }
 
+// successDoc 对应一条 @Success 注解。
 type successDoc struct {
-	status   int
+	status int
+	// category 是小写的 {object}、{array} 等类别。
 	category string
 	typeName string
 	position token.Pos
 }
 
+// route 是代码中注册的一条 POST 路由。
 type route struct {
 	path     string
 	method   string
 	handler  ast.Expr
 	position token.Pos
 	source   sourceFile
-	ignored  bool
+	// ignored 表示该注册语句带有豁免注释。
+	ignored bool
 }
 
+// typeDecl 是类型声明及其所在文件，用于检查 Swagger 结构体字段注释。
 type typeDecl struct {
 	source sourceFile
 	spec   *ast.TypeSpec
 }
 
-// Lint 检查当前构建条件下的 Go 包，要求每条 POST Gin 或 net/http 路由都有匹配的 Swagger 文档。
+// Lint 检查 dir 中当前构建条件下的 Go 包，要求每条 POST 的 Gin 或 net/http 路由都有匹配的
+// Swagger 文档，且 POST 文档反过来都能找到实际路由。
+// 目录必须在 Go 模块或工作区内；类型或加载错误会一并返回。
 func Lint(dir string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
@@ -104,6 +127,7 @@ func Lint(dir string) error {
 		return fmt.Errorf("检查目录 %q 失败: 不是目录", dir)
 	}
 
+	// 空目录不需要处于模块中，也无需调用 go list。
 	hasGoFile := false
 	err = filepath.WalkDir(dir, func(filePath string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -132,6 +156,7 @@ func Lint(dir string) error {
 		return fmt.Errorf("加载 Go 包失败: %w", err)
 	}
 
+	// 收集非测试源文件，以及所有类型声明（供字段注释检查使用）。
 	files := make([]sourceFile, 0)
 	typeDecls := make(map[*types.TypeName]typeDecl)
 	var errs []error
@@ -160,6 +185,7 @@ func Lint(dir string) error {
 		}
 	}
 
+	// 解析所有函数的 Swagger 注解；handler 声明处带豁免注释则整体跳过。
 	functions := make(map[*types.Func]*functionDoc)
 	ignoredDocs := make(map[*types.Func]bool)
 	for _, source := range files {
@@ -178,11 +204,13 @@ func Lint(dir string) error {
 		}
 	}
 
+	// @BasePath 可出现在任意注释中，匹配 @Router 与实际路由时作为可选前缀。
 	var bases []string
 	for _, source := range files {
 		bases = append(bases, basePaths(source.file)...)
 	}
 
+	// 找出所有 POST 路由；Gin 路由会先根据 Group 变量还原完整路径前缀。
 	groups := collectGroups(files)
 	var routes []route
 	for _, source := range files {
@@ -198,6 +226,7 @@ func Lint(dir string) error {
 		})
 	}
 
+	// 只有 POST handler 或带 POST @Router 的函数，才报告其注解格式问题。
 	postHandlers := make(map[*types.Func]bool)
 	for _, current := range routes {
 		if current.method == "POST" {
@@ -215,6 +244,7 @@ func Lint(dir string) error {
 		}
 	}
 
+	// 逐条路由校验 handler 文档；matchedDocs 记录已被路由关联过的 @Router，registered 记录已注册的方法加路径。
 	matchedDocs := make(map[token.Pos]bool)
 	registered := make(map[string]bool)
 	for _, current := range routes {
@@ -261,6 +291,7 @@ func Lint(dir string) error {
 		checkActualResponses(doc, typeDecls, &errs)
 	}
 
+	// 反向检查：POST 的 @Router 必须有实际注册的路由。
 	for _, function := range functions {
 		for _, doc := range function.routers {
 			if doc.method != "POST" {
@@ -285,6 +316,7 @@ func Lint(dir string) error {
 	return errors.Join(uniqueErrors(errs)...)
 }
 
+// uniqueErrors 按错误文本去重并丢弃 nil，保持原有顺序。
 func uniqueErrors(errs []error) []error {
 	seen := make(map[string]bool, len(errs))
 	result := make([]error, 0, len(errs))
@@ -298,6 +330,8 @@ func uniqueErrors(errs []error) []error {
 	return result
 }
 
+// parseFunctionDoc 解析 decl 文档注释中的 @Summary、@Router、@Param、@Success；
+// 格式错误记入 issues，由调用方决定是否报告。
 func parseFunctionDoc(source sourceFile, decl *ast.FuncDecl) *functionDoc {
 	doc := &functionDoc{source: source, decl: decl}
 	if decl.Doc == nil {
@@ -350,6 +384,7 @@ func parseFunctionDoc(source sourceFile, decl *ast.FuncDecl) *functionDoc {
 	return doc
 }
 
+// commentLines 返回注释组中以 @ 开头的注解行，已去除注释标记和前导 *。
 func commentLines(group *ast.CommentGroup) []string {
 	var lines []string
 	for _, comment := range group.List {
@@ -370,6 +405,7 @@ func commentLines(group *ast.CommentGroup) []string {
 	return lines
 }
 
+// collectGroups 收集文件中通过 gin Group 调用初始化或赋值的变量，供还原路由前缀使用。
 func collectGroups(files []sourceFile) map[types.Object]ast.Expr {
 	groups := make(map[types.Object]ast.Expr)
 	for _, source := range files {
@@ -406,6 +442,7 @@ func collectGroups(files []sourceFile) map[types.Object]ast.Expr {
 	return groups
 }
 
+// isGinGroupCall 判断 expr 是否是 gin 的 Group 调用。
 func isGinGroupCall(expr ast.Expr, info *types.Info) bool {
 	call, ok := ast.Unparen(expr).(*ast.CallExpr)
 	if !ok {
@@ -415,6 +452,9 @@ func isGinGroupCall(expr ast.Expr, info *types.Info) bool {
 	return fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == "github.com/gin-gonic/gin" && fn.Name() == "Group"
 }
 
+// routesForCall 判断 call 是否是 Gin 或 net/http 的 POST 路由注册，返回识别出的路由。
+// Gin Any、net/http 的 Handle/HandleFunc（无方法限定）按 POST 处理；
+// 路径或 Handle/Match 的方法不是常量时返回违规。
 func routesForCall(source sourceFile, call *ast.CallExpr, groups map[types.Object]ast.Expr) ([]route, []error) {
 	fn, selection := calledFunc(call, source.pkg.TypesInfo)
 	if fn == nil || fn.Pkg() == nil {
@@ -541,6 +581,7 @@ func routesForCall(source sourceFile, call *ast.CallExpr, groups map[types.Objec
 	return found, nil
 }
 
+// postMethods 若 methods 含 POST 或 ANY 则返回 {"POST"}，否则返回 nil；本检查只关心 POST。
 func postMethods(methods []string) []string {
 	for _, method := range methods {
 		if strings.EqualFold(method, "POST") || strings.EqualFold(method, "ANY") {
@@ -550,12 +591,14 @@ func postMethods(methods []string) []string {
 	return nil
 }
 
+// ginMethods 是 Gin 路由注册方法名到 HTTP 方法的映射。
 var ginMethods = map[string][]string{
 	"GET": {"GET"}, "POST": {"POST"}, "PUT": {"PUT"}, "PATCH": {"PATCH"},
 	"DELETE": {"DELETE"}, "OPTIONS": {"OPTIONS"}, "HEAD": {"HEAD"},
 	"Any": httpMethods,
 }
 
+// splitHTTPPattern 拆分 Go 1.22 的“METHOD /path”模式，没有方法时返回 found=false。
 func splitHTTPPattern(pattern string) (string, string, bool) {
 	parts := strings.SplitN(pattern, " ", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
@@ -564,6 +607,7 @@ func splitHTTPPattern(pattern string) (string, string, bool) {
 	return strings.ToUpper(parts[0]), parts[1], true
 }
 
+// stringSlice 返回字符串常量切片字面量的大写元素；不是该形式时返回 nil。
 func stringSlice(expr ast.Expr, info *types.Info) []string {
 	literal, ok := ast.Unparen(expr).(*ast.CompositeLit)
 	if !ok {
@@ -580,6 +624,7 @@ func stringSlice(expr ast.Expr, info *types.Info) []string {
 	return result
 }
 
+// groupPrefix 沿 Group 调用链还原 expr 对应的路由前缀；depth 用于防止变量循环引用。
 func groupPrefix(expr ast.Expr, info *types.Info, groups map[types.Object]ast.Expr, depth int) string {
 	if expr == nil || depth > 16 {
 		return ""
@@ -608,6 +653,7 @@ func groupPrefix(expr ast.Expr, info *types.Info, groups map[types.Object]ast.Ex
 	return ""
 }
 
+// calledFunc 返回 call 调用的函数及其方法选择信息；无法解析时 fn 为 nil。
 func calledFunc(call *ast.CallExpr, info *types.Info) (*types.Func, *types.Selection) {
 	switch fun := ast.Unparen(call.Fun).(type) {
 	case *ast.SelectorExpr:
@@ -620,6 +666,7 @@ func calledFunc(call *ast.CallExpr, info *types.Info) (*types.Func, *types.Selec
 	return nil, nil
 }
 
+// isServeMuxMethod 判断 fn 是否是 net/http.ServeMux 的方法。
 func isServeMuxMethod(fn *types.Func) bool {
 	signature, ok := fn.Type().(*types.Signature)
 	if !ok || signature.Recv() == nil {
@@ -633,6 +680,7 @@ func isServeMuxMethod(fn *types.Func) bool {
 	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "net/http" && named.Obj().Name() == "ServeMux"
 }
 
+// routeHandler 解析路由的 handler 函数；支持标识符、选择器，以及单参数包装调用（如 http.HandlerFunc(h)）。
 func routeHandler(current route) *types.Func {
 	switch handler := ast.Unparen(current.handler).(type) {
 	case *ast.Ident:
@@ -649,6 +697,7 @@ func routeHandler(current route) *types.Func {
 	return nil
 }
 
+// matchingRouterDocs 返回与路由 current 方法、路径都匹配的 @Router。
 func matchingRouterDocs(doc *functionDoc, current route, bases []string) []routerDoc {
 	var result []routerDoc
 	for _, router := range doc.routers {
@@ -660,6 +709,7 @@ func matchingRouterDocs(doc *functionDoc, current route, bases []string) []route
 	return result
 }
 
+// basePaths 返回文件注释中声明的所有 @BasePath。
 func basePaths(file *ast.File) []string {
 	var paths []string
 	for _, group := range file.Comments {
@@ -675,6 +725,7 @@ func basePaths(file *ast.File) []string {
 	return paths
 }
 
+// pathsMatch 判断 @Router 路径是否与实际路径一致，可选地加上 @BasePath 前缀。
 func pathsMatch(actual, documented string, bases []string) bool {
 	documented = normalizeRoute(documented)
 	if actual == documented {
@@ -688,6 +739,8 @@ func pathsMatch(actual, documented string, bases []string) bool {
 	return false
 }
 
+// checkParams 检查 @Param：路径参数须 required、位置和类型有效，
+// 且路由路径中的参数与 path 类型的 @Param 一一对应。
 func checkParams(doc *functionDoc, current route, errs *[]error) {
 	expected := pathParams(current.path)
 	found := make(map[string]bool)
@@ -723,6 +776,7 @@ func checkParams(doc *functionDoc, current route, errs *[]error) {
 	}
 }
 
+// validParamLocation 判断 @Param 的位置是否是 Swagger 支持的取值。
 func validParamLocation(location string) bool {
 	switch location {
 	case "path", "query", "header", "body", "formData", "cookie":
@@ -732,6 +786,7 @@ func validParamLocation(location string) bool {
 	}
 }
 
+// checkSchemas 检查 body 参数和 @Success 引用的类型，要求其结构体字段都有注释。
 func checkSchemas(doc *functionDoc, declarations map[*types.TypeName]typeDecl, errs *[]error) {
 	seen := make(map[types.Type]bool)
 	for _, param := range doc.params {
@@ -746,6 +801,8 @@ func checkSchemas(doc *functionDoc, declarations map[*types.TypeName]typeDecl, e
 	}
 }
 
+// checkTypeFields 递归检查 typ 引用的、声明在被检查包内的结构体，
+// 要求每个命名字段都有文档或行尾注释；seen 用于避免递归类型死循环。
 func checkTypeFields(typ types.Type, declarations map[*types.TypeName]typeDecl, seen map[types.Type]bool, errs *[]error) {
 	if typ == nil {
 		return
@@ -793,12 +850,14 @@ func checkTypeFields(typ types.Type, declarations map[*types.TypeName]typeDecl, 
 	}
 }
 
+// isDecimalType 判断 typ 是否是 shopspring/decimal.Decimal；该类型作为叶子类型，不检查其内部字段。
 func isDecimalType(typ types.Type) bool {
 	named, ok := dereference(typ).(*types.Named)
 	return ok && named.Obj().Name() == "Decimal" && named.Obj().Pkg() != nil &&
 		named.Obj().Pkg().Path() == "github.com/shopspring/decimal"
 }
 
+// checkSuccessTypes 检查 @Success：状态码须为 2xx，类型可解析且与 {object} 等类别一致。
 func checkSuccessTypes(doc *functionDoc, errs *[]error) {
 	for _, success := range doc.successes {
 		if success.status < 200 || success.status >= 300 {
@@ -815,6 +874,7 @@ func checkSuccessTypes(doc *functionDoc, errs *[]error) {
 	}
 }
 
+// fieldComment 返回字段的文档注释与行尾注释合并后的文本。
 func fieldComment(field *ast.Field) string {
 	var comments []string
 	if field.Doc != nil {
@@ -826,6 +886,9 @@ func fieldComment(field *ast.Field) string {
 	return strings.TrimSpace(strings.Join(comments, ""))
 }
 
+// checkActualResponses 对照 handler 内 gin 的 JSON 响应调用（状态码 200~399）检查 @Success：
+// 实际返回的成功状态须有对应 @Success 且类型一致；反过来，存在 JSON 成功响应时，
+// 每个 2xx 的 @Success 也须有对应响应。sharkerror.Error 视为错误响应，不参与比较。
 func checkActualResponses(doc *functionDoc, declarations map[*types.TypeName]typeDecl, errs *[]error) {
 	if doc.decl.Body == nil {
 		return
@@ -878,12 +941,15 @@ func checkActualResponses(doc *functionDoc, declarations map[*types.TypeName]typ
 	}
 }
 
+// isSharkErrorResponse 判断 typ 是否是 sharkerror.Error（或其指针）。
 func isSharkErrorResponse(typ types.Type) bool {
 	named, ok := dereference(types.Unalias(typ)).(*types.Named)
 	return ok && named.Obj().Name() == "Error" && named.Obj().Pkg() != nil &&
 		named.Obj().Pkg().Path() == "github.com/xcodego/shark/sharkerror"
 }
 
+// checkActualParams 检查 handler 内 gin 的请求体绑定调用（ShouldBind、BindJSON 等），
+// 要求存在 @Param body，且其类型与实际绑定的类型一致。
 func checkActualParams(doc *functionDoc, errs *[]error) {
 	if doc.decl.Body == nil {
 		return
@@ -924,6 +990,8 @@ func checkActualParams(doc *functionDoc, errs *[]error) {
 	})
 }
 
+// validSuccessCategory 判断 @Success 的类别（object、array、string、integer、number、boolean）
+// 是否与 typ 的底层类型相符。
 func validSuccessCategory(category string, typ types.Type) bool {
 	typ = dereference(types.Unalias(typ))
 	switch category {
@@ -953,6 +1021,7 @@ func validSuccessCategory(category string, typ types.Type) bool {
 	return false
 }
 
+// validParameterType 判断 typ 能否作为 path、query、header 参数：基本类型，或其切片、数组。
 func validParameterType(typ types.Type) bool {
 	if typ == nil {
 		return false
@@ -972,6 +1041,7 @@ func validParameterType(typ types.Type) bool {
 	}
 }
 
+// validSwaggerType 判断 typeName 是否是有效的 Swagger 类型：特殊值 file，或可解析的 Go 类型。
 func validSwaggerType(typeName string, source sourceFile) bool {
 	if typeName == "file" {
 		return true
@@ -979,6 +1049,7 @@ func validSwaggerType(typeName string, source sourceFile) bool {
 	return resolveType(typeName, source) != nil
 }
 
+// resolveType 把注解中的类型名（如 []pkg.User）解析为 Go 类型，无法解析时返回 nil。
 func resolveType(typeName string, source sourceFile) types.Type {
 	expr, err := parser.ParseExpr(typeName)
 	if err != nil {
@@ -987,6 +1058,8 @@ func resolveType(typeName string, source sourceFile) types.Type {
 	return resolveTypeExpr(expr, source)
 }
 
+// resolveTypeExpr 在 source 所在包及其导入中解析类型表达式，
+// 支持标识符、pkg.Type、指针、切片、数组、map，以及 struct{} 和 interface{}。
 func resolveTypeExpr(expr ast.Expr, source sourceFile) types.Type {
 	switch value := expr.(type) {
 	case *ast.Ident:
@@ -1076,6 +1149,7 @@ func resolveTypeExpr(expr ast.Expr, source sourceFile) types.Type {
 	return nil
 }
 
+// sameSwaggerType 判断两个类型在 Swagger 层面是否一致：忽略指针，类型本身或底层类型相同即可。
 func sameSwaggerType(actual, expected types.Type) bool {
 	actual = dereference(types.Unalias(actual))
 	expected = dereference(types.Unalias(expected))
@@ -1085,6 +1159,7 @@ func sameSwaggerType(actual, expected types.Type) bool {
 	return types.Identical(actual.Underlying(), expected.Underlying())
 }
 
+// dereference 去掉 typ 的所有指针层。
 func dereference(typ types.Type) types.Type {
 	for {
 		pointer, ok := typ.(*types.Pointer)
@@ -1095,6 +1170,7 @@ func dereference(typ types.Type) types.Type {
 	}
 }
 
+// pathParams 提取路由路径中的 {name} 参数名，通配形式 {name...} 去掉后缀。
 func pathParams(routePath string) map[string]bool {
 	result := make(map[string]bool)
 	for _, segment := range strings.Split(routePath, "/") {
@@ -1109,6 +1185,7 @@ func pathParams(routePath string) map[string]bool {
 	return result
 }
 
+// sortedKeys 返回 values 的 key，按字典序排序以保证诊断输出稳定。
 func sortedKeys(values map[string]bool) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
@@ -1118,6 +1195,7 @@ func sortedKeys(values map[string]bool) []string {
 	return keys
 }
 
+// normalizeRoute 把 Gin 风格的 :id、*name 以及 {name...} 统一成 {name}，并规整为以 / 开头的干净路径。
 func normalizeRoute(routePath string) string {
 	routePath = strings.TrimSpace(routePath)
 	if routePath == "" {
@@ -1139,14 +1217,17 @@ func normalizeRoute(routePath string) string {
 	return result
 }
 
+// joinRoute 拼接前缀和路径，返回以 / 开头且无多余斜杠的路径。
 func joinRoute(prefix, routePath string) string {
 	return "/" + strings.Trim(strings.TrimSpace(prefix)+"/"+strings.TrimSpace(routePath), "/")
 }
 
+// operationKey 返回“METHOD 规范化路径”形式的路由标识。
 func operationKey(method, routePath string) string {
 	return strings.ToUpper(method) + " " + normalizeRoute(routePath)
 }
 
+// constantString 返回 expr 的字符串常量值。
 func constantString(info *types.Info, expr ast.Expr) (string, bool) {
 	value := info.Types[expr].Value
 	if value == nil || value.Kind() != constant.String {
@@ -1155,6 +1236,7 @@ func constantString(info *types.Info, expr ast.Expr) (string, bool) {
 	return constant.StringVal(value), true
 }
 
+// constantInt 返回 expr 的整数常量值；不是整数常量或溢出时 ok 为 false。
 func constantInt(info *types.Info, expr ast.Expr) (int, bool) {
 	value := info.Types[expr].Value
 	if value == nil || value.Kind() != constant.Int {
@@ -1164,6 +1246,7 @@ func constantInt(info *types.Info, expr ast.Expr) (int, bool) {
 	return int(number), ok && int64(int(number)) == number
 }
 
+// appendViolation 在 position 处追加违规；position 无效时退回文件开头，带豁免注释的行不追加。
 func appendViolation(errs *[]error, source sourceFile, position token.Pos, message string) {
 	if !position.IsValid() {
 		position = source.file.Pos()
@@ -1175,6 +1258,7 @@ func appendViolation(errs *[]error, source sourceFile, position token.Pos, messa
 	*errs = append(*errs, Violation{Position: source.pkg.Fset.PositionFor(position, false), Message: message})
 }
 
+// hasForceIgnoreComment 判断 line 的上一行是否以豁免注释结尾。
 func hasForceIgnoreComment(file *ast.File, fset *token.FileSet, line int) bool {
 	for _, group := range file.Comments {
 		if fset.PositionFor(group.End(), false).Line == line-1 &&

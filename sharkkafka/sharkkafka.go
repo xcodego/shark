@@ -1,7 +1,4 @@
-// Package sharkkafka 提供 Kafka 生产者和消费者的统一封装。
-//
-// Config 支持 SASL/SCRAM-SHA512 和 TLS；Writer 按 topic 缓存并使用 RequireOne 确认。
-// 批量消费者缓冲消息，处理后提交 offset；提交失败会重试至成功或上下文取消。
+// Package sharkkafka 提供 Kafka 客户端封装：SASL/SCRAM-SHA-512 与 TLS 连接、带缓存的 Writer 以及批量消费。
 package sharkkafka
 
 import (
@@ -18,120 +15,33 @@ import (
 	"go.uber.org/zap"
 )
 
-// Config 定义了 Kafka 集群的连接配置。
-//
-// 字段说明：
-//   - Host:     Broker 地址列表（必填）
-//   - User:     SASL 认证用户名（可选，为空时不启用认证）
-//   - Password: SASL 认证密码（可选，为空时不启用认证）
-//   - TLS:      是否启用 TLS 加密（默认 false，内网明文通信；true 时使用系统根证书验证服务端）
-//
-// 认证与加密组合：
-//   - User+Password 均非空 → 启用 SASL/SCRAM-SHA512 认证
-//   - TLS = true → 启用 TLS 加密（使用系统默认根证书池）
-//   - 两者同时启用 → SASL 认证 + TLS 加密（公网安全通信）
-//
-// 使用示例：
-//
-//	// YAML 配置
-//	// kafka:
-//	//   host:
-//	//     - "broker1:9092"
-//	//   user: "myuser"
-//	//   password: "mypassword"
-//	//   tls: true
-//
-//	cfg := &sharkkafka.Config{
-//	    Host:     []string{"kafka1:9092", "kafka2:9092"},
-//	    User:     "admin",
-//	    Password: "secret123",
-//	}
-//	sk, err := sharkkafka.New(ctx, cfg, logger)
+// Config 是 Kafka 的连接配置。
 type Config struct {
-	Host     []string `json:"host" yaml:"host" mapstructure:"host"`             // Kafka Broker 地址列表，例如 ["broker1:9092", "broker2:9092"]
-	User     string   `json:"user" yaml:"user" mapstructure:"user"`             // SASL 认证用户名，为空时不启用认证
-	Password string   `json:"password" yaml:"password" mapstructure:"password"` // SASL 认证密码，为空时不启用认证
-	TLS      bool     `json:"tls" yaml:"tls" mapstructure:"tls"`                // 是否启用 TLS 加密，默认 false（内网明文），true 时使用系统根证书验证服务端
+	Host     []string `json:"host" yaml:"host" mapstructure:"host"`             // Broker 地址
+	User     string   `json:"user" yaml:"user" mapstructure:"user"`             // SASL 用户名；与密码都非空才启用 SCRAM-SHA-512 认证
+	Password string   `json:"password" yaml:"password" mapstructure:"password"` // SASL 密码
+	TLS      bool     `json:"tls" yaml:"tls" mapstructure:"tls"`                // 是否启用 TLS
 }
 
-// SharkKafka 是 Kafka 生产者和消费者的统一管理器。
-//
-// 内部维护了 Writer 池（按 topic 缓存）和共享的 Dialer（连接配置）。
-// 所有公共方法都是并发安全的。
-//
-// 字段说明：
-//   - ctx:     上下文，用于控制消费者生命周期
-//   - config:  连接配置
-//   - writers: Writer 池，key 为 topic 名称
-//   - lock:    保护 writers map 的互斥锁
-//   - dialer:  连接拨号器（nil = 全明文；非 nil 时包含 SASL 和/或 TLS 配置）
-//   - logger:  zap 日志记录器
-//
-// 零值 SharkKafka 不可直接使用，必须通过 New() 创建。
+// Client 管理按 topic 缓存的 Kafka Writer 和共享的连接配置。请使用 New 创建。
 type Client struct {
-	ctx     context.Context          // 上下文，用于控制消费者生命周期
-	config  *Config                  // 连接配置
-	writers map[string]*kafka.Writer // Writer 池，按 topic 缓存
-	lock    sync.Mutex               // 保护 writers map 的互斥锁
-	dialer  *kafka.Dialer            // 连接拨号器（nil = 全明文；非 nil 时包含 SASL 和/或 TLS 配置）
-	logger  *zap.Logger              // zap 日志记录器
+	ctx     context.Context
+	config  *Config
+	writers map[string]*kafka.Writer
+	lock    sync.Mutex
+	dialer  *kafka.Dialer
+	logger  *zap.Logger
 	antpool *ants.Pool
 }
 
-// New 创建一个 SharkKafka 实例。
-//
-// 参数：
-//   - ctx:    上下文，用于控制消费者生命周期
-//   - config: 连接配置（必填，为 nil 时返回错误）
-//   - logger: zap 日志记录器
-//
-// 认证与加密逻辑：
-//   - SASL:   config.User 和 config.Password 均非空 → 启用 SASL/SCRAM-SHA512
-//   - TLS:    config.TLS = true → 启用 TLS 加密（使用系统默认根证书池）
-//   - 组合:   SASL + TLS 同时启用 → 公网安全通信（认证 + 加密）
-//   - 无 SASL + 无 TLS → 内网明文通信（当前默认行为）
-//
-// Dialer 构建矩阵：
-//
-//	+----------+---------+------------------------+
-//	|  SASL    |  TLS    |  Dialer                |
-//	+----------+---------+------------------------+
-//	|  禁用    |  禁用   |  nil (全明文)           |
-//	|  禁用    |  启用   |  TLS only              |
-//	|  启用    |  禁用   |  SASL only (当前行为)   |
-//	|  启用    |  启用   |  SASL + TLS             |
-//	+----------+---------+------------------------+
-//
-// 使用示例：
-//
-//	// 内网明文
-//	cfg := &sharkkafka.Config{Host: []string{"localhost:9092"}}
-//
-//	// SASL 认证 + TLS 加密（公网）
-//	cfg := &sharkkafka.Config{
-//	    Host:     []string{"kafka.example.com:9093"},
-//	    User:     "admin",
-//	    Password: "secret",
-//	    TLS:      true,
-//	}
-//
-//	// 仅 TLS 加密（公网，无认证）
-//	cfg := &sharkkafka.Config{
-//	    Host: []string{"kafka.example.com:9093"},
-//	    TLS:  true,
-//	}
-//
-//	sk, err := sharkkafka.New(context.Background(), cfg, logger)
-//	if err != nil {
-//	    log.Fatalf("初始化 Kafka 失败: %v", err)
-//	}
-//	defer sk.Close()
+// New 创建 Kafka 客户端；config 不能为 nil。
+// ctx 控制 BatchConsumer 的生命周期，取消后所有批量消费退出。
+// TLS 最低 TLS 1.2；SASL 与 TLS 可独立组合，均未启用时 dialer 为 nil（使用 kafka-go 默认拨号器）。
 func New(ctx context.Context, config *Config, logger *zap.Logger) (*Client, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config required")
 	}
 
-	// 构建 TLS 配置（config.TLS = true 时启用，使用系统默认根证书池）
 	var tlsConfig *tls.Config
 	if config.TLS {
 		tlsConfig = &tls.Config{
@@ -145,7 +55,6 @@ func New(ctx context.Context, config *Config, logger *zap.Logger) (*Client, erro
 
 	switch {
 	case hasSASL && hasTLS:
-		// SASL 认证 + TLS 加密
 		mechanism, err := scram.Mechanism(scram.SHA512, config.User, config.Password)
 		if err != nil {
 			return nil, err
@@ -156,7 +65,6 @@ func New(ctx context.Context, config *Config, logger *zap.Logger) (*Client, erro
 			TLS:           tlsConfig,
 		}
 	case hasSASL && !hasTLS:
-		// SASL 认证，明文传输（内网）
 		mechanism, err := scram.Mechanism(scram.SHA512, config.User, config.Password)
 		if err != nil {
 			return nil, err
@@ -167,13 +75,11 @@ func New(ctx context.Context, config *Config, logger *zap.Logger) (*Client, erro
 			TLS:           nil,
 		}
 	case !hasSASL && hasTLS:
-		// 仅 TLS 加密，无认证
 		dialer = &kafka.Dialer{
 			Timeout: 10 * time.Second,
 			TLS:     tlsConfig,
 		}
 	default:
-		// 无 SASL 无 TLS，全明文
 		dialer = nil
 	}
 	antpool, err := ants.NewPool(10)
@@ -190,30 +96,31 @@ func New(ctx context.Context, config *Config, logger *zap.Logger) (*Client, erro
 	}, nil
 }
 
-// WriterConfig 配置 Kafka writer 的批次大小、确认级别和写入模式。
+// WriterConfig 配置 Kafka Writer，字段为 nil 时使用默认值。
+// 默认：BatchSize 10000、BatchBytes 2MB、BatchTimeout 1s、RequiredAcks 为 RequireOne、Async 为 true。
 type WriterConfig struct {
-	BatchSize    *int                // 单批最多消息数 默认 10000
-	BatchBytes   *int                // 单批最大字节数 2MB
-	BatchTimeout *time.Duration      // 批次超时时间   1s
-	RequiredAcks *kafka.RequiredAcks // 消息确认级别   RequiredAcks
-	Async        *bool               // 是否异步写入   true
+	BatchSize    *int
+	BatchBytes   *int
+	BatchTimeout *time.Duration
+	RequiredAcks *kafka.RequiredAcks
+	Async        *bool
 }
 
-// Writer 返回 topic 对应的 Kafka writer；未缓存时按 cfg 创建。
+// Writer 返回 topic 对应的 Writer，首次调用时创建并缓存；已缓存时忽略 cfg。
+// 使用 Hash 分区策略，相同 key 的消息进入同一分区。
 func (s *Client) Writer(topic string, cfg *WriterConfig) (*kafka.Writer, error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
-	// 已缓存：直接返回
 	if writer, ok := s.writers[topic]; ok {
 		return writer, nil
 	}
 	if cfg == nil {
 		cfg = &WriterConfig{
-			BatchSize:    sharkutils.Pointer(10000),            // 单批最多 10000 条消息
-			BatchBytes:   sharkutils.Pointer(1024 * 1024 * 2),  // 单批最多 2MB
-			BatchTimeout: sharkutils.Pointer(time.Second),      // 批次超时 1s
-			RequiredAcks: sharkutils.Pointer(kafka.RequireOne), // 仅等待 Leader 确认
-			Async:        sharkutils.Pointer(true),             // 同步写入，保证消息不丢失
+			BatchSize:    sharkutils.Pointer(10000),
+			BatchBytes:   sharkutils.Pointer(1024 * 1024 * 2),
+			BatchTimeout: sharkutils.Pointer(time.Second),
+			RequiredAcks: sharkutils.Pointer(kafka.RequireOne),
+			Async:        sharkutils.Pointer(true),
 		}
 	}
 	if cfg.BatchSize == nil {
@@ -231,91 +138,66 @@ func (s *Client) Writer(topic string, cfg *WriterConfig) (*kafka.Writer, error) 
 	if cfg.Async == nil {
 		cfg.Async = sharkutils.Pointer(true)
 	}
-	// 未缓存：创建新的 Writer
 	writerConfig := kafka.WriterConfig{
 		Brokers:      s.config.Host,
 		Topic:        topic,
 		Dialer:       s.dialer,
-		Balancer:     &kafka.Hash{},          // 按 Key 哈希分区，保证相同 Key 进入同一分区
-		BatchSize:    *cfg.BatchSize,         // 单批最多 10000 条消息
-		BatchBytes:   *cfg.BatchBytes,        // 单批最多 2MB
-		BatchTimeout: *cfg.BatchTimeout,      // 批次超时 1s
-		RequiredAcks: int(*cfg.RequiredAcks), // 仅等待 Leader 确认
-		Async:        *cfg.Async,             // 同步写入，保证消息不丢失
+		Balancer:     &kafka.Hash{},
+		BatchSize:    *cfg.BatchSize,
+		BatchBytes:   *cfg.BatchBytes,
+		BatchTimeout: *cfg.BatchTimeout,
+		RequiredAcks: int(*cfg.RequiredAcks),
+		Async:        *cfg.Async,
 	}
 	writer := kafka.NewWriter(writerConfig)
 	s.writers[topic] = writer
 	return writer, nil
 }
 
-// CloseWriter 关闭指定 topic 的 Writer 并从池中移除。
-//
-// 如果 topic 对应的 Writer 不存在，则不做任何操作返回 nil。
-//
-// 参数：
-//   - topic: 要关闭的 topic 名称
-//
-// 使用示例：
-//
-//	// 中途关闭某个 topic 的 Writer（例如动态创建的临时 topic）
-//	err := sk.CloseWriter("temp-topic")
-//	if err != nil {
-//	    log.Printf("关闭 Writer 失败: %v", err)
-//	}
+// CloseWriter 关闭并移除指定 topic 的 Writer；topic 不存在时返回 nil。
 func (s *Client) CloseWriter(topic string) error {
 	s.lock.Lock()
 	writer, ok := s.writers[topic]
 	if ok {
-		delete(s.writers, topic) // 从池中移除
+		delete(s.writers, topic)
 	}
-	s.lock.Unlock() // 提前释放锁，避免 Close 阻塞其他 Writer 操作
+	s.lock.Unlock()
 	if ok {
 		return writer.Close()
 	}
 	return nil
 }
 
-// Close 关闭所有 Writer 并清空池。
-//
-// 遍历所有已缓存的 Writer 并逐一关闭。
-// 收集第一个遇到的错误返回（不中断后续关闭操作）。
-//
-// 调用时机：在应用退出时调用（通常配合 defer）。
-//
-// 使用示例：
-//
-//	sk, _ := sharkkafka.New(ctx, cfg, logger)
-//	defer sk.Close() // 应用退出时自动关闭所有 Writer
+// Close 关闭所有 Writer 并清空缓存，返回遇到的第一个错误。
 func (s *Client) Close() error {
 	s.lock.Lock()
 	writers := s.writers
-	s.writers = make(map[string]*kafka.Writer) // 清空池
+	s.writers = make(map[string]*kafka.Writer)
 	s.lock.Unlock()
 	var firstErr error
 	for _, writer := range writers {
 		if err := writer.Close(); err != nil && firstErr == nil {
-			firstErr = err // 只记录第一个错误
+			firstErr = err
 		}
 	}
 	return firstErr
 }
 
-// ReaderConfig 配置 Kafka reader 的拉取范围和起始 offset。
-// 默认 FirstOffset 会使新消费组从最早消息开始；不需要重放时请设置 LastOffset，
-// 或使用已有 offset 的消费组。
+// ReaderConfig 配置 Kafka Reader，字段为 nil 时使用默认值。
+// 默认：MinBytes 1、MaxBytes 10MB、StartOffset 为 FirstOffset（仅对新消费组生效）。
 type ReaderConfig struct {
-	MinBytes    *int   // 单次拉取的最小字节数（低延迟）默认 1
-	MaxBytes    *int   // 单次拉取的最大字节数（高吞吐）默认 10MB
-	StartOffset *int64 // 默认 FirstOffset：新 group 重放历史；不需要重放须另建 consumer（LastOffset 或已有 offset 的 group）
+	MinBytes    *int
+	MaxBytes    *int
+	StartOffset *int64
 }
 
-// Reader 为 topic 和消费组创建 Kafka reader。
+// Reader 为 topic 和消费组创建 Kafka Reader，调用方负责关闭。
 func (s *Client) Reader(topic string, group string, cfg *ReaderConfig) *kafka.Reader {
 	if cfg == nil {
 		cfg = &ReaderConfig{
-			MinBytes:    sharkutils.Pointer(1),                 // 有数据就返回（低延迟）
-			MaxBytes:    sharkutils.Pointer(10 * 1024 * 1024),  // 单次最多返回 10MB
-			StartOffset: sharkutils.Pointer(kafka.FirstOffset), // 新 group 从最早消息开始（会重放）；不重放须另建 consumer
+			MinBytes:    sharkutils.Pointer(1),
+			MaxBytes:    sharkutils.Pointer(10 * 1024 * 1024),
+			StartOffset: sharkutils.Pointer(kafka.FirstOffset),
 		}
 	}
 	if cfg.MinBytes == nil {
@@ -331,37 +213,41 @@ func (s *Client) Reader(topic string, group string, cfg *ReaderConfig) *kafka.Re
 		Brokers:           s.config.Host,
 		Topic:             topic,
 		GroupID:           group,
-		MinBytes:          *cfg.MinBytes, // 有数据就返回（低延迟）
-		MaxBytes:          *cfg.MaxBytes, // 单次最多返回 10MB
+		MinBytes:          *cfg.MinBytes,
+		MaxBytes:          *cfg.MaxBytes,
 		Dialer:            s.dialer,
-		StartOffset:       *cfg.StartOffset, // 未指定时默认 FirstOffset
-		SessionTimeout:    time.Minute,      // 超过这个时间没有收到 Consumer 的 heartbeat，Coordinator 认为 Consumer 死了，然后触发 Rebalance。
-		RebalanceTimeout:  time.Minute,      // Consumer 加入 group 后，参与 rebalance 的最大等待时间。
-		QueueCapacity:     10000,            // 内部缓冲队列容量，避免短时间内拉取过多消息导致内存占用过高
+		StartOffset:       *cfg.StartOffset,
+		SessionTimeout:    time.Minute,
+		RebalanceTimeout:  time.Minute,
+		QueueCapacity:     10000,
 		HeartbeatInterval: 10 * time.Second,
 	})
 	return reader
 }
 
-// BatchConfig 配置批量消费者的拉取和批处理行为。
-// handler 返回 true 时提交当前批次并继续；返回 false 时停止消费。
+// BatchConfig 配置批量消费行为，字段为 nil 时使用默认值。
+// BatchSize 为每批最多条数，默认 10000；Timeout 为读到首条后继续凑批的最长等待，默认 0，
+// 即取走通道中已有的消息就回调，不额外等待。
 type BatchConfig struct {
 	ReaderConfig
-	BatchSize *int           // 每批处理的最大消息数，默认 10000
-	Timeout   *time.Duration // 批次处理超时时间，默认 0 立即返回
+	BatchSize *int
+	Timeout   *time.Duration
 }
 
-// BatchConsumer 按批消费消息；handler 返回 false 时停止消费。
+// BatchConsumer 阻塞式批量消费消息，直到 ctx 取消、handler 返回 false 或 offset 提交最终失败。
+//
+// 每批消息交给 handler 处理，handler 返回 true 后才提交 offset（至少一次语义），
+// handler panic 会被恢复并按返回 false 处理；ctx 取消时 handler 可能收到空切片。
 func (s *Client) BatchConsumer(topic string, group string, cfg *BatchConfig, handler func([]kafka.Message) bool) {
 	if cfg == nil {
 		cfg = &BatchConfig{
 			ReaderConfig: ReaderConfig{
-				MinBytes:    sharkutils.Pointer(1),                 // 有数据就返回（低延迟）
-				MaxBytes:    sharkutils.Pointer(10 * 1024 * 1024),  // 单次最多返回 10MB
-				StartOffset: sharkutils.Pointer(kafka.FirstOffset), // 新 group 从最早消息开始（会重放）；不重放须另建 consumer
+				MinBytes:    sharkutils.Pointer(1),
+				MaxBytes:    sharkutils.Pointer(10 * 1024 * 1024),
+				StartOffset: sharkutils.Pointer(kafka.FirstOffset),
 			},
-			BatchSize: sharkutils.Pointer(10000),            // 每批处理的最大消息数，默认  10000
-			Timeout:   sharkutils.Pointer(time.Duration(0)), // 批次处理超时时间，默认 0 立即返回
+			BatchSize: sharkutils.Pointer(10000),
+			Timeout:   sharkutils.Pointer(time.Duration(0)),
 		}
 	}
 	if cfg.MinBytes == nil {
@@ -381,71 +267,63 @@ func (s *Client) BatchConsumer(topic string, group string, cfg *BatchConfig, han
 	}
 	reader := s.Reader(topic, group, &cfg.ReaderConfig)
 	batchSize := *cfg.BatchSize
-	channel := make(chan kafka.Message, batchSize*2) // 带缓冲 channel，容量为 batchSize 的 2 倍
+	// 拉取协程（本函数）与处理协程之间的缓冲，容量为两批，让拉取与处理并行
+	channel := make(chan kafka.Message, batchSize*2)
 	defer func() {
-		close(channel) // 关闭 channel，通知消费协程退出
-		reader.Close() // 关闭 Reader
+		close(channel)
+		reader.Close()
 	}()
-	// 创建可取消的子上下文，用于 handler 返回 false 时停止拉取
 	running, runningCalcel := context.WithCancel(s.ctx)
 	defer runningCalcel()
 
-	// safeHandler 包装 handler，捕获 panic 防止消费者崩溃
 	safeHandler := func(msgs []kafka.Message) (result bool) {
 		defer func() {
 			if r := recover(); r != nil {
 				s.logger.Error("Consumer handler panic", zap.Any("err", r))
-				result = false // panic 后停止消费
+				result = false
 			}
 		}()
 		return handler(msgs)
 	}
 
-	// 消费协程：从 channel 批量拉取消息并处理
+	// 处理协程：攒批 → handler → 提交 offset
 	go func() {
 		for {
-			// 批量排空 channel，最多取 batchSize 条
 			messages := sharkutils.DrainChannelN(running, channel, batchSize, *cfg.Timeout)
-			// 调用 handler 处理消息
 			result := safeHandler(messages)
 			if !result {
-				// handler 返回 false 或 panic → 停止拉取
 				s.logger.Warn("Consumer handler returned false, stop consuming", zap.String("topic", topic), zap.String("group", group))
 				runningCalcel()
 				return
 			}
-			// 提交 offset 一直重试,直到成功
+			// 提交失败每秒重试，次数上限极大，实际等同于一直重试直到 ctx 取消
 			var commitError error
 			for i := 0; i < 50000000; i++ {
 				commitError = reader.CommitMessages(running, messages...)
 				if commitError == nil {
-					break // 提交成功
+					break
 				}
 				s.logger.Warn("提交 Kafka 消息 offset 失败", zap.String("topic", reader.Config().Topic), zap.Error(commitError), zap.Int("retry", i+1))
-				time.Sleep(time.Second) // 等待 1 秒后重试
-				// 再次检查上下文是否已取消
+				time.Sleep(time.Second)
 				if running.Err() != nil {
 					return
 				}
 			}
 			if commitError != nil {
 				runningCalcel()
-				// 虽然不是panic,日志带上panic字样以便监控报警,当panic处理
 				s.logger.Error("提交 Kafka 消息 offset 失败 panic", zap.String("topic", reader.Config().Topic), zap.Error(commitError))
 				return
 			}
-			// 再次检查上下文是否已取消
 			if running.Err() != nil {
 				return
 			}
 		}
 	}()
 
-	// 拉取协程：从 Kafka 逐条拉取消息并推入 channel
+	// fetchMessages 拉取一条消息投入通道；返回 false 表示应退出。读取出错时等待 1 秒后重试。
 	var fetchMessages = func(ctx context.Context) bool {
 		msg, err := reader.FetchMessage(ctx)
 		if err == nil {
-			// 拉取成功：推入 channel（若 ctx 取消则退出）
 			select {
 			case channel <- msg:
 			case <-ctx.Done():
@@ -453,11 +331,9 @@ func (s *Client) BatchConsumer(topic string, group string, cfg *BatchConfig, han
 			}
 			return true
 		}
-		// 上下文取消 → 正常退出
 		if ctx.Err() != nil {
 			return false
 		}
-		// 拉取失败（非上下文取消）：记录错误并等待 1 秒后重试
 		s.logger.Error("读取 Kafka 消息失败", zap.String("topic", reader.Config().Topic), zap.Error(err))
 		select {
 		case <-time.After(time.Second):
@@ -467,15 +343,12 @@ func (s *Client) BatchConsumer(topic string, group string, cfg *BatchConfig, han
 		return true
 	}
 
-	// 主循环：持续拉取消息
 	for {
 		select {
 		case <-running.Done():
-			// 上下文取消 → 退出
 			return
 		default:
 			if !fetchMessages(running) {
-				// 拉取失败且不可恢复 → 退出
 				return
 			}
 		}

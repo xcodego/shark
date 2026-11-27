@@ -9,48 +9,27 @@ import (
 	"gorm.io/gorm"
 )
 
-// SharkTable 是 gorm.DB 的便捷包装器。
-//
-// 它在 gorm 基础上提供了链式调用的条件构建方法，
-// 自动跳过空值（避免写一堆 if xx != "" 判空），
-// 并支持通过 sharksql.SqlBuilder 构建复杂 OR 查询。
-//
-// 与 sharksql.SqlBuilder 的区别：
-//   - SqlBuilder 是纯 SQL 条件构建器，返回 SQL 字符串和参数，需要自行拼接到 gorm 中。
-//   - SharkTable 直接封装 gorm.DB，调用方法后立即生效，适合简单的单表 CRUD。
-//
-// 使用示例：
-//
-//	table := NewTable(db.Table("users"))
-//	var users []User
-//	err := table.
-//	    Eq("status", 1).
-//	    Like("name", "张").
-//	    FromTo("created_at", start, end).
-//	    Asc("id").
-//	    Gorm().Find(&users).Error
+// SharkTable 是 gorm.DB 的链式查询包装器。
+// 条件方法在值为空时自动跳过，列名直接拼入 SQL，必须是可信的固定列名，不能来自用户输入。
+// 所有链式方法都会修改并返回同一个 SharkTable，不要在多个查询间共享。
 type SharkTable struct {
 	db *gorm.DB
 }
 
-// NewTable 创建一个 SharkTable 实例，
-// db 通常由 db.Table("table_name") 获得。
-//
-// 示例：
-//
-//	table := NewTable(app.Db.Table("users"))
+// NewTable 基于 db 创建 SharkTable。
 func NewTable(db *gorm.DB) *SharkTable {
 	return &SharkTable{db: db}
 }
 
-// NewTableWithReq 创建 SharkTable，并按 req 构建查询条件。
+// NewTableWithReq 创建 SharkTable，并按 req 的 struct 标签通过 sharksql.Where 构建查询条件。
 func NewTableWithReq(db *gorm.DB, req any) *SharkTable {
 	sql, args := sharksql.Where(req)
 	db = db.Where(sql, args...)
 	return &SharkTable{db: db}
 }
 
-// isEmpty 判断值是否为空（nil / 空指针 / 空切片 / 空 map）。
+// isEmpty 判断值是否为空：nil、nil 指针/接口、空切片、空 map（最多解引用 4 层）。
+// 空字符串和零值数字不算空。
 func (t *SharkTable) isEmpty(v any) bool {
 	if v == nil {
 		return true
@@ -74,25 +53,16 @@ func (t *SharkTable) isEmpty(v any) bool {
 	return false
 }
 
-// Gorm 返回底层的 gorm.DB，用于执行最终的查询操作（Find、Count 等）。
-//
-// 示例：
-//
-//	var users []User
-//	err := table.Eq("status", 1).Gorm().Find(&users).Error
-//
-//	var count int64
-//	err := table.Eq("deleted", 0).Gorm().Count(&count).Error
+// Gorm 返回当前累积了查询条件的 *gorm.DB。
 func (t *SharkTable) Gorm() *gorm.DB {
 	return t.db
 }
 
 // SelectWithTiflash 设置查询使用 TiFlash 引擎。
-//
-// 第一个参数为 SELECT 的列名，后续参数为对应值。
+// columns 为空时不做任何修改；第一个元素作为 SELECT 查询串，其余作为其占位符参数。
 // 底层等价于 SELECT /*+ read_from_storage(tiflash[table_name]) */ col1, col2 ...
 //
-// 注意：使用此方法只能查询单表，不能查询关联表。
+// 注意：hint 使用 db 当前 Statement.Table，只适用于单表查询。
 //
 // 示例：
 //
@@ -120,8 +90,7 @@ func (t *SharkTable) Select(query any, args ...any) *SharkTable {
 	return t
 }
 
-// Distinct 添加 DISTINCT 去重。
-// columns 为空时自动跳过。
+// Distinct 添加 DISTINCT 去重；columns 为空时自动跳过。
 //
 // 示例：
 //
@@ -140,13 +109,12 @@ func (t *SharkTable) Distinct(columns ...string) *SharkTable {
 }
 
 // Eq 添加等值条件：column = ?。
-// value 为空（nil/空串/空切片）时自动跳过。
+// value 为空（nil、nil 指针、空切片/map，见 isEmpty）时自动跳过；空字符串不会被跳过。
 //
 // 示例：
 //
 //	table.Eq("status", 1)           // status = 1
-//	table.Eq("name", "")            // 跳过，不添加条件
-//	table.Eq("status", status)      // status 变量为 nil 时自动跳过
+//	table.Eq("status", statusPtr)   // statusPtr 为 nil 指针时自动跳过
 func (t *SharkTable) Eq(column string, value any) *SharkTable {
 	if !t.isEmpty(value) {
 		t.db = t.db.Where(column+" = ?", value)
@@ -233,8 +201,8 @@ func (t *SharkTable) FromTo(column string, from any, to any) *SharkTable {
 	return t
 }
 
-// Between 添加左闭右开区间条件：[from, to)，即 column >= ? AND column < ?。
-// from 或 to 为空时自动跳过。
+// Between 与 FromTo 等价：左闭右开区间 [from, to)，即 column >= ? AND column < ?。
+// 注意不是 SQL 的 BETWEEN（闭区间）；from 或 to 为空时自动跳过。
 //
 // 示例：
 //
@@ -248,7 +216,7 @@ func (t *SharkTable) Between(column string, from any, to any) *SharkTable {
 }
 
 // Like 添加模糊匹配条件：column LIKE '%value%'（前后通配）。
-// value 为空时自动跳过。支持指针类型自动解引用。
+// value 为空时自动跳过，指针会自动解引用。
 //
 // 示例：
 //
@@ -269,7 +237,7 @@ func (t *SharkTable) Like(column string, value any) *SharkTable {
 }
 
 // NotLike 添加反向模糊匹配条件：column NOT LIKE '%value%'。
-// value 为空时自动跳过。支持指针类型自动解引用。
+// value 为空时自动跳过，指针会自动解引用。
 //
 // 示例：
 //
@@ -289,7 +257,7 @@ func (t *SharkTable) NotLike(column string, value any) *SharkTable {
 }
 
 // LikeLeft 添加后缀匹配条件：column LIKE '%value'，匹配以 value 结尾的字符串。
-// value 为空时自动跳过。支持指针类型自动解引用。
+// value 为空时自动跳过，指针会自动解引用。
 //
 // 示例：
 //
@@ -309,7 +277,7 @@ func (t *SharkTable) LikeLeft(column string, value any) *SharkTable {
 }
 
 // LikeRight 添加前缀匹配条件：column LIKE 'value%'，匹配以 value 开头的字符串。
-// value 为空时自动跳过。支持指针类型自动解引用。
+// value 为空时自动跳过，指针会自动解引用。
 //
 // 示例：
 //
@@ -375,8 +343,7 @@ func (t *SharkTable) IsNotNull(column string) *SharkTable {
 	return t
 }
 
-// Asc 添加升序排序。
-// column 为空时自动跳过。
+// Asc 添加升序排序。column 为 nil 时自动跳过（空字符串不会跳过）。
 //
 // 示例：
 //
@@ -389,8 +356,7 @@ func (t *SharkTable) Asc(column string) *SharkTable {
 	return t
 }
 
-// Desc 添加降序排序。
-// column 为空时自动跳过。
+// Desc 添加降序排序。column 为 nil 时自动跳过（空字符串不会跳过）。
 //
 // 示例：
 //
@@ -402,8 +368,6 @@ func (t *SharkTable) Desc(column string) *SharkTable {
 	}
 	return t
 }
-
-// ========== 字段对字段算术方法 ==========
 
 // AddCol 添加字段对字段加法表达式：column + otherColumn。
 // 用于 SELECT 子句。
@@ -547,36 +511,34 @@ func (t *SharkTable) IfNullAs(column string, defaultValue string, alias string) 
 	return sharksql.IfNullAs(column, defaultValue, alias)
 }
 
-// Case 构建参数化 CASE 表达式：CASE column WHEN ? THEN ? ... END，返回 (sql, args) 元组。
+// Case 构建 CASE 表达式：CASE column WHEN ... THEN ... [ELSE ...] END。
+// pairs 为 WHEN/THEN 值对，个数为奇数时最后一个为 ELSE 值。
+// 值通过 fmt.Sprint 直接拼入 SQL（非参数化），字符串值需自带引号。
 //
 // 示例：
 //
-//	sql, args := table.Case("status", 0, "待支付", 1, "已支付", "未知")
-//	// sql:  CASE status WHEN ? THEN ? WHEN ? THEN ? ELSE ? END
-//	// args: [0, 待支付, 1, 已支付, 未知]
+//	table.Case("status", 0, "'待支付'", 1, "'已支付'", "'未知'")
+//	// → CASE status WHEN 0 THEN '待支付' WHEN 1 THEN '已支付' ELSE '未知' END
 func (t *SharkTable) Case(column string, pairs ...any) string {
 	return sharksql.Case(column, pairs...)
 }
 
-// CaseAs 构建 CASE 表达式并指定别名，返回 string。
+// CaseAs 构建带别名的 CASE 表达式，规则同 Case。
 func (t *SharkTable) CaseAs(column string, alias string, pairs ...any) string {
 	return sharksql.CaseAs(column, alias, pairs...)
 }
 
-// When 构建 WHEN ... THEN ... 表达式片段。
+// When 构建 WHEN ... THEN ... 表达式片段，奇数个参数时最后一个为 ELSE 值。
 func (t *SharkTable) When(args ...any) string {
 	return sharksql.When(args...)
 }
 
-// WhenAs 构建 WHEN ... THEN ... 表达式片段并指定别名。
+// WhenAs 构建带别名的 WHEN ... THEN ... 表达式片段，规则同 When。
 func (t *SharkTable) WhenAs(alias string, args ...any) string {
 	return sharksql.WhenAs(alias, args...)
 }
 
-// ========== JSON 方法 ==========
-
-// JsonExtract 添加 JSON_EXTRACT 到 SELECT。
-// 用于从 JSON 列中提取字段。
+// JsonExtract 构建 JSON_EXTRACT 表达式，用于 SELECT。
 //
 // 示例：
 //
@@ -586,13 +548,12 @@ func (t *SharkTable) JsonExtract(column string, path ...string) string {
 	return sharksql.JsonExtract(column, path...)
 }
 
-// JsonUnquote 添加 JSON_UNQUOTE(JSON_EXTRACT(...)) 到 SELECT。
+// JsonUnquote 构建 JSON_UNQUOTE(JSON_EXTRACT(...)) 表达式，用于 SELECT。
 func (t *SharkTable) JsonUnquote(column string, path string) string {
 	return sharksql.JsonUnquote(column, path)
 }
 
-// JsonSearchOne 添加 JSON_SEARCH 条件。
-// value 为空时自动跳过。
+// JsonSearchOne 添加 JSON_SEARCH 条件，value 会被包裹 % 通配符；value 为空时自动跳过。
 //
 // 示例：
 //
@@ -606,8 +567,7 @@ func (t *SharkTable) JsonSearchOne(column string, value any) *SharkTable {
 	return t
 }
 
-// JsonContains 添加 JSON_CONTAINS 条件。
-// value 为空时自动跳过。
+// JsonContains 添加 JSON_CONTAINS 条件；value 为空时自动跳过。
 //
 // 示例：
 //
@@ -621,22 +581,22 @@ func (t *SharkTable) JsonContains(column string, value any) *SharkTable {
 	return t
 }
 
-// JsonLength 添加 JSON_LENGTH 到 SELECT。
+// JsonLength 构建 JSON_LENGTH 表达式，用于 SELECT。
 func (t *SharkTable) JsonLength(column string) string {
 	return sharksql.JsonLength(column)
 }
 
-// JsonKeys 添加 JSON_KEYS 到 SELECT。
+// JsonKeys 构建 JSON_KEYS 表达式，用于 SELECT。
 func (t *SharkTable) JsonKeys(column string) string {
 	return sharksql.JsonKeys(column)
 }
 
-// JsonType 添加 JSON_TYPE 到 SELECT。
+// JsonType 构建 JSON_TYPE 表达式，用于 SELECT。
 func (t *SharkTable) JsonType(column string) string {
 	return sharksql.JsonType(column)
 }
 
-// Group 添加分组条件，多个字段以逗号拼接。
+// Group 添加 GROUP BY，多个字段以逗号拼接；columns 为空时自动跳过。
 //
 // 示例：
 //
@@ -650,9 +610,8 @@ func (t *SharkTable) Group(columns ...string) *SharkTable {
 	return t
 }
 
-// Or 以 OR 方式添加 sharksql.SqlBuilder 构建的条件。
-// builder 为 nil 或 Build 为空时自动跳过。
-// 支持传入多个 builder，之间以 OR 连接。
+// Or 将多个 sharksql.SqlBuilder 构建的条件以 OR 连接后，作为一个整体 AND 到现有条件上。
+// nil 的 builder 或 Build 结果为空的条件会被跳过。
 //
 // 示例：
 //
@@ -690,42 +649,42 @@ func (t *SharkTable) Or(builder ...*sharksql.SqlBuilder) *SharkTable {
 	return t
 }
 
-// ToFindSql 返回 Find 操作生成的 SQL，不执行查询。
+// ToFindSql 返回 Find 操作生成的 SQL（DryRun，不执行）。
 func (t *SharkTable) ToFindSql() string {
 	tx := t.db.Session(&gorm.Session{DryRun: true}).Find(nil)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 	return sql
 }
 
-// ToCountSql 返回 Count 操作生成的 SQL，不执行查询。
+// ToCountSql 返回 Count 操作生成的 SQL（DryRun，不执行）。
 func (t *SharkTable) ToCountSql() string {
 	tx := t.db.Session(&gorm.Session{DryRun: true}).Count(nil)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 	return sql
 }
 
-// ToDeleteSql 返回 Delete 操作生成的 SQL，不执行查询。
+// ToDeleteSql 返回 Delete 操作生成的 SQL（DryRun，不执行）。
 func (t *SharkTable) ToDeleteSql() string {
 	tx := t.db.Session(&gorm.Session{DryRun: true}).Delete(nil)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 	return sql
 }
 
-// ToUpdateSql 返回 Updates 操作生成的 SQL，不执行更新。
+// ToUpdateSql 返回 Updates 操作生成的 SQL（DryRun，不执行）。
 func (t *SharkTable) ToUpdateSql(values any) string {
 	tx := t.db.Session(&gorm.Session{DryRun: true}).Updates(values)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 	return sql
 }
 
-// ToInsertSql 返回 Create 操作生成的 SQL，不执行插入。
+// ToInsertSql 返回 Create 操作生成的 SQL（DryRun，不执行）。
 func (t *SharkTable) ToInsertSql(values any) string {
 	tx := t.db.Session(&gorm.Session{DryRun: true}).Create(values)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 	return sql
 }
 
-// ToTakeSql 返回 Take 操作生成的 SQL，不执行查询。
+// ToTakeSql 返回 Take 操作生成的 SQL（DryRun，不执行）。
 func (t *SharkTable) ToTakeSql() string {
 	tx := t.db.Session(&gorm.Session{DryRun: true}).Take(nil)
 	sql := tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)

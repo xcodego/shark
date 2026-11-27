@@ -10,6 +10,7 @@ import (
 	"github.com/xcodego/shark/sharklint/go/goroutine"
 )
 
+// writeFile 创建 path 的父目录并写入 content, 供测试构造源码文件。
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -20,6 +21,7 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// TestCheckDir 验证非测试文件中的 go 语句被报告, 测试文件、注释、字符串和非 .go 文件不报告。
 func TestCheckDir(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "safe.go"), `package example
@@ -57,6 +59,7 @@ func worker() {
 	}
 }
 
+// TestCheckDirCleanAndSymlinks 验证符号链接指向的违规代码不被检查。
 func TestCheckDirCleanAndSymlinks(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "safe.go"), "package example\nfunc safe() {}\n")
@@ -73,6 +76,7 @@ func TestCheckDirCleanAndSymlinks(t *testing.T) {
 	}
 }
 
+// TestForceIgnoreComment 验证 goroutine 豁免注释生效, 其他检查器的豁免注释不生效。
 func TestForceIgnoreComment(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "worker.go"), `package example
@@ -91,6 +95,7 @@ func worker() {
 	}
 }
 
+// TestCheckDirErrors 验证解析错误、目录不存在和非目录的错误报告。
 func TestCheckDirErrors(t *testing.T) {
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "bad.go")

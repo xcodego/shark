@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
+// TestCanalLoggingToggle 验证 EnableCanalLog 开关决定 canal 日志是否输出。
 func TestCanalLoggingToggle(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		t.Run(map[bool]string{false: "disabled", true: "enabled"}[enabled], func(t *testing.T) {
@@ -27,6 +28,7 @@ func TestCanalLoggingToggle(t *testing.T) {
 	}
 }
 
+// TestOnUpdateDispatchesOnlyAfterRow 验证更新事件只回调修改后的新行。
 func TestOnUpdateDispatchesOnlyAfterRow(t *testing.T) {
 	listener := NewBinlogListener(&BinlogConfig{Database: "testdb"})
 	var gotTable string

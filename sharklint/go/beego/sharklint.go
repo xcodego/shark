@@ -14,6 +14,7 @@ import (
 	"strings"
 )
 
+// modulePaths 是被禁止导入的 Beego 模块路径, 子路径同样被禁止。
 var modulePaths = []string{
 	"github.com/beego/beego",
 	"github.com/astaxie/beego",
@@ -21,10 +22,13 @@ var modulePaths = []string{
 
 // Violation 表示导入 Beego 包的位置。
 type Violation struct {
-	Position   token.Position
+	// Position 是 import 语句的位置。
+	Position token.Position
+	// ImportPath 是被禁止的导入路径。
 	ImportPath string
 }
 
+// Error 返回带位置信息的违规描述。
 func (v Violation) Error() string {
 	return fmt.Sprintf("%s: 禁止导入 Beego 包 %q", v.Position, v.ImportPath)
 }
@@ -66,6 +70,7 @@ func Lint(dir string) error {
 	return errors.Join(errs...)
 }
 
+// checkImports 返回 file 中所有导入 Beego 包的违规。
 func checkImports(fset *token.FileSet, file *ast.File) []error {
 	var errs []error
 	for _, spec := range file.Imports {
@@ -81,6 +86,8 @@ func checkImports(fset *token.FileSet, file *ast.File) []error {
 	return errs
 }
 
+// isBeegoImport 判断导入路径是否等于或位于被禁止的 Beego 模块之下;
+// 前缀需以 "/" 分隔, 因此 github.com/beego/bee 等 CLI 包不会被误报。
 func isBeegoImport(importPath string) bool {
 	for _, modulePath := range modulePaths {
 		if importPath == modulePath || strings.HasPrefix(importPath, modulePath+"/") {

@@ -46,70 +46,75 @@ import (
 	"gorm.io/gorm"
 )
 
-// App 保存应用生命周期状态及已初始化的服务和中间件。
+// App 保存应用的生命周期状态，以及已初始化的中间件和服务客户端。
+// 未配置的组件字段为 nil。
 type App struct {
 	// Wg 等待已登记的后台 goroutine。
 	Wg *sync.WaitGroup
 	// Sg 合并相同 key 的并发请求。
 	Sg *singleflight.Group
-	// Context 是应用共享的 context。
+	// Context 应用共享的 context，Hunt 退出时会被取消。
 	Context context.Context
 
-	// Id 是实例编号。
+	// Id 实例编号。
 	Id string
-	// Env 是运行环境。
+	// Env 运行环境。
 	Env string
-	// Name 是服务名称。
+	// Name 服务名称。
 	Name string
-	// Project 是项目名称。
+	// Project 项目名称。
 	Project string
 
-	// Db 是 MySQL 数据库连接。
+	// Db MySQL 数据库连接。
 	Db *gorm.DB
-	// Grpc 是 gRPC 服务端。
+	// Grpc gRPC 服务端。
 	Grpc *sharkgrpc.Server
-	// Minio 是 MinIO 客户端。
+	// Minio MinIO 客户端。
 	Minio *minio.Client
-	// Timer 是定时器组件。
+	// Timer 定时器组件，依赖 Redis。
 	Timer *sharktimer.Client
-	// Kafka 是 Kafka 客户端。
+	// Kafka Kafka 客户端。
 	Kafka *sharkkafka.Client
-	// RedisCluster 是 Redis 集群客户端。
+	// RedisCluster Redis 集群客户端。
 	RedisCluster *redis.ClusterClient
-	// RedisClient 是 Redis 单机或主从客户端。
+	// RedisClient Redis 单机或主从客户端。
 	RedisClient *redis.Client
-	// RedisHelper 提供 Redis 常用操作。
+	// RedisHelper Redis 常用操作封装，由 RedisCluster 或 RedisClient 构建。
 	RedisHelper *sharkredis.Helper
-	// Logger 是结构化日志记录器。
+	// Logger 结构化日志记录器。
 	Logger *zap.Logger
-	// Elastic 是 Elasticsearch 客户端。
+	// Elastic Elasticsearch 客户端。
 	Elastic *sharkelastic.Client
-	// ClickHouse 是 ClickHouse 原生客户端。
+	// ClickHouse ClickHouse 原生客户端。
 	ClickHouse driver.Conn
-	// Etcd 是 etcd 客户端。
+	// Etcd etcd 客户端。
 	Etcd *clientv3.Client
-	// Mongodb 是 MongoDB 客户端。
+	// Mongodb MongoDB 客户端。
 	Mongodb *mongo.Client
-	// Rabbitmq 是 RabbitMQ 客户端。
+	// Rabbitmq RabbitMQ 客户端。
 	Rabbitmq *sharkrabbitmq.Client
-	// RisingWave 是 RisingWave 数据库连接。
+	// RisingWave RisingWave 数据库连接。
 	RisingWave *gorm.DB
-	// GinEngine 是 Gin HTTP 引擎。
+	// GinEngine Gin HTTP 引擎。
 	GinEngine *gin.Engine
-	// Ws 是 WebSocket 服务组件。
+	// Ws WebSocket 服务组件。
 	Ws *sharkws.Server
-	// AntPool 管理并发任务。
+	// AntPool 并发任务协程池。
 	AntPool *ants.Pool
 
-	// cancelFunc 取消应用 context。
+	// cancelFunc 取消 Context。
 	cancelFunc context.CancelFunc
-	// sharklog 封装 Shark 日志组件。
+	// sharklog Shark 日志组件，退出时关闭。
 	sharklog *sharklog.SharkLog
-	// muxServe 是 pprof HTTP 路由复用器。
+	// pprofServe pprof 的 HTTP 路由复用器。
 	pprofServe *http.ServeMux
 }
 
-// New 根据配置创建 App，并初始化已配置的中间件和服务。
+// New 根据 Options 创建 App，并初始化已配置的中间件和服务。
+//
+// 初始化失败时返回 error，已创建的连接不会被统一关闭。
+// Redis 兼容模式（options.redis）先尝试集群，仅当服务端不支持集群时回退到单机/主从。
+// pprof 与健康检查服务以 goroutine 方式启动，不阻塞 New。
 func New(options *Options) (*App, error) {
 	if options == nil {
 		return nil, fmt.Errorf("options required")
@@ -126,6 +131,8 @@ func New(options *Options) (*App, error) {
 		Wg:         &sync.WaitGroup{},
 		Sg:         &singleflight.Group{},
 	}
+
+	// antpool > 0 时使用固定容量池；否则使用无容量上限的池，空闲 worker 1 分钟后回收。
 	if options.antpool > 0 {
 		pool, err := ants.NewPool(options.antpool)
 		if err != nil {
@@ -161,6 +168,7 @@ func New(options *Options) (*App, error) {
 		app.Kafka = kafka
 		app.Logger.Info("连接kafka成功", zap.Strings("host", options.kafka.Host), zap.String("user", options.kafka.User))
 
+		// 日志经 Kafka 异步写入；Writer 创建失败时仅输出到控制台
 		if options.kafkalog {
 			topic := fmt.Sprintf("%v_game_log_%v", app.Project, app.Env)
 			kafkaLogWriter, err := app.Kafka.Writer(topic, &sharkkafka.WriterConfig{
@@ -174,7 +182,8 @@ func New(options *Options) (*App, error) {
 		}
 	}
 
-	// 自动模式先尝试集群连接，仅在服务端不支持集群时回退到单机/主从模式。
+	// ---- Redis 初始化 ----
+	// options.redis 自动探测：先尝试集群，服务端不支持集群时回退到单机/主从
 	if options.redis != nil {
 		app.Logger.Info("正在连接redis", zap.Strings("host", options.redis.Host))
 		cluster, err := sharkredis.NewCluster(app.Context, options.redis)
@@ -202,6 +211,7 @@ func New(options *Options) (*App, error) {
 		}
 	}
 
+	// 显式配置的 redis_cluster，仅在自动探测未建立集群连接时生效
 	if options.redis_cluster != nil && app.RedisCluster == nil {
 		app.Logger.Info("正在连接redis cluster", zap.Strings("host", options.redis_cluster.Host))
 		redis, err := sharkredis.NewCluster(app.Context, options.redis_cluster)
@@ -214,6 +224,7 @@ func New(options *Options) (*App, error) {
 		app.RedisHelper = sharkredis.NewHelperWithCluster(redis, app.Project, app.Name)
 	}
 
+	// 显式配置的 redis_client，仅在自动探测未建立单机连接时生效
 	if options.redis_client != nil && app.RedisClient == nil {
 		app.Logger.Info("正在连接redis client", zap.Strings("host", options.redis_client.Host))
 		redis, err := sharkredis.NewClient(app.Context, options.redis_client)
@@ -251,7 +262,7 @@ func New(options *Options) (*App, error) {
 	}
 
 	// ---- RabbitMQ 初始化 ----
-	// 用服务名称的 CRC16 哈希值选择 broker 节点。
+	// broker 节点由 sharkrabbitmq.New 按服务名的 CRC16 选择；此处仅用相同算法计算并打印所选节点。
 	if options.rabbitmq != nil {
 		app.Logger.Info("正在连接rabbitmq", zap.Strings("host", options.rabbitmq.Host), zap.String("user", options.rabbitmq.User))
 		mq, err := sharkrabbitmq.New(app.Context, app.Logger, app.Wg, options.rabbitmq, app.Name, app.Id)
@@ -326,6 +337,8 @@ func New(options *Options) (*App, error) {
 		app.Logger.Info("连接clickhouse成功", zap.Strings("host", options.clickhouse.Host), zap.String("database", options.clickhouse.Database))
 	}
 
+	// ---- 依赖 Redis 的组件 ----
+	// Timer 与 gRPC 优先使用 RedisCluster，其次 RedisClient；两者都没有时无法启动
 	if options.timer {
 		if app.RedisCluster != nil {
 			app.Timer = sharktimer.NewTimer(app.Context, app.Project, app.Name, app.Id, app.RedisCluster, app.Logger)
@@ -338,6 +351,7 @@ func New(options *Options) (*App, error) {
 		}
 	}
 
+	// gRPC Server 依赖 Redis。grpc 端口未配置时以 -1 创建，其 Run 会直接返回、不监听端口
 	if options.grpc > 0 {
 		if app.RedisCluster != nil {
 			server := sharkgrpc.New(app.Context, app.Project, app.RedisCluster, app.Logger, options.grpc)
@@ -360,6 +374,7 @@ func New(options *Options) (*App, error) {
 		}
 	}
 
+	// ---- HTTP 初始化 ----
 	if options.http > 0 {
 		app.GinEngine = sharkhttp.New(app.Context, app.Env, app.Logger, options.http)
 		app.Ws = sharkws.NewSharkWS(app.GinEngine)
@@ -379,7 +394,7 @@ func New(options *Options) (*App, error) {
 	return app, nil
 }
 
-// pprof 在指定端口启动性能分析服务。
+// pprof 在指定端口启动 pprof 服务，失败时仅记录日志。
 func (a *App) pprof(port int) {
 	a.Logger.Info("开启pprof服务", zap.Int("port", port))
 	a.pprofServe = http.NewServeMux()
@@ -390,7 +405,7 @@ func (a *App) pprof(port int) {
 	}
 }
 
-// health_service 在指定端口提供进程存活探测，不检查中间件状态。
+// health_service 在指定端口提供 /health 存活探测，只表示进程存活，不检查中间件状态。
 func (a *App) health_service(port int) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(writer http.ResponseWriter, request *http.Request) {
@@ -405,20 +420,21 @@ func (a *App) health_service(port int) {
 	}
 }
 
-// AppComponent 是可由 Hunt 启动的应用组件。
+// AppComponent 可由 Hunt 启动的应用组件。
 type AppComponent interface {
-	// Start 启动组件。
+	// Start 启动组件，应为非阻塞调用。
 	Start()
 }
 
-// banner 记录服务启动信息。
+// banner 输出服务启动信息。
 func (a *App) banner() {
 	hostName, _ := os.Hostname()
 	a.Logger.Info("shark running", zap.String("name", a.Name), zap.String("id", a.Id), zap.String("env", a.Env), zap.String("host", hostName))
 	a.Logger.Info("****************server start****************")
 }
 
-// Hunt 启动组件并阻塞至收到退出信号，然后取消应用 context 并等待已登记的 goroutine。
+// Hunt 启动组件和 gRPC 服务，阻塞直到收到 SIGTERM 或 SIGINT，然后依次：
+// 取消 Context、等待已登记的 goroutine、关闭 ClickHouse 与日志。
 func (a *App) Hunt(components ...AppComponent) {
 	for _, c := range components {
 		c.Start()
@@ -433,6 +449,7 @@ func (a *App) Hunt(components ...AppComponent) {
 	<-sig
 
 	a.cancelFunc()
+	// 留出 500ms 让依赖 Context 的组件开始退出
 	time.Sleep(time.Millisecond * 500)
 	a.Wg.Wait()
 	if a.ClickHouse != nil {
@@ -444,6 +461,10 @@ func (a *App) Hunt(components ...AppComponent) {
 	a.sharklog.Close()
 }
 
+// RunInPool 将 fn 提交到 AntPool 执行，panic 会被捕获并记录日志。
+//
+// fn 为 nil 或 AntPool 未初始化时仅记录错误并返回。
+// 池满时的阻塞行为遵循 ants 默认设置。
 func (a *App) RunInPool(fn func(args ...any), args ...any) {
 	if fn == nil {
 		a.Logger.Error("RunInPool nil function provided")
@@ -465,7 +486,15 @@ func (a *App) RunInPool(fn func(args ...any), args ...any) {
 	})
 }
 
-// WithTimeout 在指定时间内执行 fn；超时或 parent 被取消时返回 ErrTimeout。
+// WithTimeout 在 AntPool 中执行 fn，并限制其执行时间。
+//
+// 返回值：
+//   - fn 正常返回：fn 的 error；
+//   - 超过 timeout：返回 "timeout"；
+//   - parent 被取消：返回 ctx 的错误（通常为 context.Canceled）；
+//   - fn panic：返回包含堆栈的 error。
+//
+// fn 超时后仍会在后台继续运行，应自行监听传入的 context 以便及时退出。
 func (a *App) WithTimeout(ctx context.Context, timeout time.Duration, fn func(context.Context) error) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -502,6 +531,7 @@ func (a *App) WithTimeout(ctx context.Context, timeout time.Duration, fn func(co
 	case err := <-ch:
 		return err
 	case <-ctxinner.Done():
+		// 优先取已完成的结果，避免结果与超时同时到达时误报
 		select {
 		case err := <-ch:
 			return err
@@ -514,7 +544,9 @@ func (a *App) WithTimeout(ctx context.Context, timeout time.Duration, fn func(co
 	}
 }
 
-// ParallelCall 并行执行函数，等待全部完成并合并返回的错误和 panic。
+// ParallelCall 并行执行 funcs，等待全部完成后合并返回所有错误（含 panic）。
+//
+// nil 函数会被跳过；所有错误通过 errors.Join 合并，无错误时返回 nil。
 func (a *App) ParallelCall(funcs ...func() error) error {
 	if a.AntPool == nil {
 		return errors.New("AntPool is nil")
@@ -549,6 +581,10 @@ func (a *App) ParallelCall(funcs ...func() error) error {
 	return errors.Join(errs...)
 }
 
+// SafeGo 在新的 goroutine 中执行 fn，panic 会被捕获并记录日志。
+//
+// 与 RunInPool 不同，SafeGo 不经过 AntPool，不受协程池容量限制。
+// fn 为 nil 时仅记录错误并返回。
 func (a *App) SafeGo(fn func(args ...any)) {
 	if fn == nil {
 		a.Logger.Error("RunInPool nil function provided")
