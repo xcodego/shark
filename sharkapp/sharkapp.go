@@ -15,9 +15,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/gin-gonic/gin"
 	"github.com/howeyc/crc16"
 	"github.com/panjf2000/ants/v2"
+	"github.com/xcodego/shark/sharkclickhouse"
 	"github.com/xcodego/shark/sharkdb"
 	"github.com/xcodego/shark/sharkelastic"
 	"github.com/xcodego/shark/sharketcd"
@@ -65,13 +67,13 @@ type App struct {
 	// Db 是 MySQL 数据库连接。
 	Db *gorm.DB
 	// Grpc 是 gRPC 服务端。
-	Grpc *sharkgrpc.RpcServer
+	Grpc *sharkgrpc.Server
 	// Minio 是 MinIO 客户端。
 	Minio *minio.Client
 	// Timer 是定时器组件。
-	Timer *sharktimer.Timer
+	Timer *sharktimer.Client
 	// Kafka 是 Kafka 客户端。
-	Kafka *sharkkafka.SharkKafka
+	Kafka *sharkkafka.Client
 	// RedisCluster 是 Redis 集群客户端。
 	RedisCluster *redis.ClusterClient
 	// RedisClient 是 Redis 单机或主从客户端。
@@ -81,7 +83,9 @@ type App struct {
 	// Logger 是结构化日志记录器。
 	Logger *zap.Logger
 	// Elastic 是 Elasticsearch 客户端。
-	Elastic *sharkelastic.SharkElastic
+	Elastic *sharkelastic.Client
+	// ClickHouse 是 ClickHouse 原生客户端。
+	ClickHouse driver.Conn
 	// Etcd 是 etcd 客户端。
 	Etcd *clientv3.Client
 	// Mongodb 是 MongoDB 客户端。
@@ -93,7 +97,7 @@ type App struct {
 	// GinEngine 是 Gin HTTP 引擎。
 	GinEngine *gin.Engine
 	// Ws 是 WebSocket 服务组件。
-	Ws *sharkws.SharkWS
+	Ws *sharkws.Server
 	// AntPool 管理并发任务。
 	AntPool *ants.Pool
 
@@ -310,6 +314,18 @@ func New(options *Options) (*App, error) {
 		app.Minio = client
 	}
 
+	// ---- ClickHouse 初始化 ----
+	if options.clickhouse != nil {
+		app.Logger.Info("正在连接clickhouse", zap.Strings("host", options.clickhouse.Host), zap.String("database", options.clickhouse.Database), zap.String("user", options.clickhouse.User))
+		client, err := sharkclickhouse.New(app.Context, options.clickhouse)
+		if err != nil {
+			app.Logger.Error("连接clickhouse失败", zap.Strings("host", options.clickhouse.Host), zap.Error(err))
+			return nil, err
+		}
+		app.ClickHouse = client
+		app.Logger.Info("连接clickhouse成功", zap.Strings("host", options.clickhouse.Host), zap.String("database", options.clickhouse.Database))
+	}
+
 	if options.timer {
 		if app.RedisCluster != nil {
 			app.Timer = sharktimer.NewTimer(app.Context, app.Project, app.Name, app.Id, app.RedisCluster, app.Logger)
@@ -419,6 +435,11 @@ func (a *App) Hunt(components ...AppComponent) {
 	a.cancelFunc()
 	time.Sleep(time.Millisecond * 500)
 	a.Wg.Wait()
+	if a.ClickHouse != nil {
+		if err := a.ClickHouse.Close(); err != nil {
+			a.Logger.Error("关闭clickhouse失败", zap.Error(err))
+		}
+	}
 	a.Logger.Debug("****************server exit****************")
 	a.sharklog.Close()
 }

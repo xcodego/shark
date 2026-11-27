@@ -21,8 +21,8 @@ import (
 )
 
 // SharkElastic 封装 Elasticsearch 客户端及索引、查询辅助方法。
-type SharkElastic struct {
-	Client *elasticsearch.Client
+type Client struct {
+	Elastic *elasticsearch.Client
 }
 
 // MappingType 定义 Elasticsearch 字段类型常量
@@ -68,7 +68,7 @@ type FieldMapping struct {
 //
 //	// 创建索引不指定映射（分片数 1）
 //	err := client.CreateIndex(ctx, "orders", 1)
-func (s *SharkElastic) CreateIndex(ctx context.Context, index string, shards int, mappings ...FieldMapping) error {
+func (s *Client) CreateIndex(ctx context.Context, index string, shards int, mappings ...FieldMapping) error {
 	if index == "" {
 		return fmt.Errorf("索引名称不能为空")
 	}
@@ -107,7 +107,7 @@ func (s *SharkElastic) CreateIndex(ctx context.Context, index string, shards int
 		Index: index,
 		Body:  bodyReader,
 	}
-	resp, err := req.Do(ctx, s.Client)
+	resp, err := req.Do(ctx, s.Elastic)
 	if err != nil {
 		return fmt.Errorf("创建索引请求执行失败: %w", err)
 	}
@@ -132,7 +132,7 @@ func (s *SharkElastic) CreateIndex(ctx context.Context, index string, shards int
 //	    sharkelastic.FieldMapping{Name: "name", Type: sharkelastic.MappingTypeText},
 //	    sharkelastic.FieldMapping{Name: "age", Type: sharkelastic.MappingTypeInteger},
 //	)
-func (s *SharkElastic) CreateIndexStrict(ctx context.Context, index string, shards int, mappings ...FieldMapping) error {
+func (s *Client) CreateIndexStrict(ctx context.Context, index string, shards int, mappings ...FieldMapping) error {
 	if index == "" {
 		return fmt.Errorf("索引名称不能为空")
 	}
@@ -176,7 +176,7 @@ func (s *SharkElastic) CreateIndexStrict(ctx context.Context, index string, shar
 		Index: index,
 		Body:  bodyReader,
 	}
-	resp, err := req.Do(ctx, s.Client)
+	resp, err := req.Do(ctx, s.Elastic)
 	if err != nil {
 		return fmt.Errorf("创建索引请求执行失败: %w", err)
 	}
@@ -201,7 +201,7 @@ func (s *SharkElastic) CreateIndexStrict(ctx context.Context, index string, shar
 //	    sharkelastic.FieldMapping{Name: "phone", Type: sharkelastic.MappingTypeKeyword},
 //	    sharkelastic.FieldMapping{Name: "birthday", Type: sharkelastic.MappingTypeDate},
 //	)
-func (s *SharkElastic) SetIndexMapping(ctx context.Context, index string, mappings ...FieldMapping) error {
+func (s *Client) SetIndexMapping(ctx context.Context, index string, mappings ...FieldMapping) error {
 	if index == "" {
 		return fmt.Errorf("索引名称不能为空")
 	}
@@ -229,7 +229,7 @@ func (s *SharkElastic) SetIndexMapping(ctx context.Context, index string, mappin
 		Index: []string{index},
 		Body:  bytes.NewReader(bodyBytes),
 	}
-	resp, err := req.Do(ctx, s.Client)
+	resp, err := req.Do(ctx, s.Elastic)
 	if err != nil {
 		return fmt.Errorf("更新映射请求执行失败: %w", err)
 	}
@@ -264,8 +264,8 @@ func (s *SharkElastic) SetIndexMapping(ctx context.Context, index string, mappin
 //	    log.Fatal(err)
 //	}
 //	fmt.Println("搜索结果:", string(respBytes))
-func (s *SharkElastic) Search(ctx context.Context, index string, query map[string]any) ([]byte, error) {
-	if s.Client == nil {
+func (s *Client) Search(ctx context.Context, index string, query map[string]any) ([]byte, error) {
+	if s.Elastic == nil {
 		return nil, fmt.Errorf("Elasticsearch 客户端未初始化")
 	}
 	if index == "" {
@@ -285,7 +285,7 @@ func (s *SharkElastic) Search(ctx context.Context, index string, query map[strin
 		Body:  bytes.NewReader(queryBytes),
 	}
 
-	resp, err := searchReq.Do(ctx, s.Client)
+	resp, err := searchReq.Do(ctx, s.Elastic)
 	if err != nil {
 		return nil, fmt.Errorf("搜索请求执行失败: %w", err)
 	}
@@ -324,15 +324,15 @@ type bulkResponse struct {
 }
 
 // sendBulkRequest 发送单批 Bulk 请求并校验结果，返回 nil 表示全部成功
-func (s *SharkElastic) sendBulkRequest(ctx context.Context, buf *bytes.Buffer) error {
-	if s.Client == nil {
+func (s *Client) sendBulkRequest(ctx context.Context, buf *bytes.Buffer) error {
+	if s.Elastic == nil {
 		return fmt.Errorf("Elasticsearch 客户端未初始化")
 	}
 
 	bulkReq := esapi.BulkRequest{
 		Body: bytes.NewReader(buf.Bytes()),
 	}
-	resp, err := bulkReq.Do(ctx, s.Client)
+	resp, err := bulkReq.Do(ctx, s.Elastic)
 	if err != nil {
 		return fmt.Errorf("Bulk 请求执行失败: %w", err)
 	}
@@ -388,7 +388,7 @@ func (s *SharkElastic) sendBulkRequest(ctx context.Context, buf *bytes.Buffer) e
 //	if err := client.Insert(ctx, "users", "user_id", docs...); err != nil {
 //	    log.Fatal(err)
 //	}
-func (s *SharkElastic) Insert(ctx context.Context, index string, idField string, docs ...any) error {
+func (s *Client) Insert(ctx context.Context, index string, idField string, docs ...any) error {
 	if index == "" {
 		return fmt.Errorf("索引名称不能为空")
 	}
@@ -469,7 +469,7 @@ func (s *SharkElastic) Insert(ctx context.Context, index string, idField string,
 //	if err := client.Upsert(ctx, "users", "user_id", docs...); err != nil {
 //	    log.Fatal(err)
 //	}
-func (s *SharkElastic) Upsert(ctx context.Context, index string, idField string, docs ...any) error {
+func (s *Client) Upsert(ctx context.Context, index string, idField string, docs ...any) error {
 	if index == "" {
 		return fmt.Errorf("索引名称不能为空")
 	}
@@ -537,7 +537,7 @@ func (s *SharkElastic) Upsert(ctx context.Context, index string, idField string,
 
 // DeleteById 使用 Bulk API 批量删除指定 ID 的文档。
 // 任意一条删除失败则整体返回汇总错误信息，全部成功返回 nil。
-func (s *SharkElastic) DeleteById(ctx context.Context, index string, ids ...any) error {
+func (s *Client) DeleteById(ctx context.Context, index string, ids ...any) error {
 	if index == "" {
 		return fmt.Errorf("索引名称不能为空")
 	}
@@ -612,7 +612,7 @@ const batchSize = 1000
 //
 //	// 按条件+唯一排序分批删除
 //	err := client.DeleteBySql(ctx, "delete from users where status = 0 order by user_id asc")
-func (s *SharkElastic) DeleteBySql(ctx context.Context, sql string) error {
+func (s *Client) DeleteBySql(ctx context.Context, sql string) error {
 	if strings.TrimSpace(sql) == "" {
 		return fmt.Errorf("SQL 不能为空")
 	}
@@ -735,7 +735,7 @@ func (s *SharkElastic) DeleteBySql(ctx context.Context, sql string) error {
 //	        }
 //	    },
 //	)
-func (s *SharkElastic) ExportExcelBySql(ctx context.Context, sql string, name string, header []any, cb func([]byte) []any) (string, error) {
+func (s *Client) ExportExcelBySql(ctx context.Context, sql string, name string, header []any, cb func([]byte) []any) (string, error) {
 	if strings.TrimSpace(sql) == "" {
 		return "", fmt.Errorf("SQL 不能为空")
 	}
@@ -882,7 +882,7 @@ func (s *SharkElastic) ExportExcelBySql(ctx context.Context, sql string, name st
 //	        }
 //	    },
 //	)
-func (s *SharkElastic) ExportCsvBySql(ctx context.Context, sql string, name string, header []any, cb func([]byte) []any) (string, error) {
+func (s *Client) ExportCsvBySql(ctx context.Context, sql string, name string, header []any, cb func([]byte) []any) (string, error) {
 	if strings.TrimSpace(sql) == "" {
 		return "", fmt.Errorf("SQL 不能为空")
 	}
@@ -996,7 +996,7 @@ func (s *SharkElastic) ExportCsvBySql(ctx context.Context, sql string, name stri
 // Summary 执行聚合 SQL 查询，并将聚合值解码到 value。
 // value 必须是结构体指针，字段的 json 标签需与 SQL 中的聚合别名一致。
 // 聚合算术表达式由 Elasticsearch bucket_script 处理。
-func (s *SharkElastic) Summary(ctx context.Context, sql string, value any) error {
+func (s *Client) Summary(ctx context.Context, sql string, value any) error {
 	if strings.TrimSpace(sql) == "" {
 		return fmt.Errorf("SQL 不能为空")
 	}
@@ -1052,7 +1052,7 @@ func (s *SharkElastic) Summary(ctx context.Context, sql string, value any) error
 }
 
 // SqlRaw 解析 SQL 风格查询并返回 Elasticsearch 原始响应。
-func (s *SharkElastic) SqlRaw(ctx context.Context, sql string) ([]byte, error) {
+func (s *Client) SqlRaw(ctx context.Context, sql string) ([]byte, error) {
 	if strings.TrimSpace(sql) == "" {
 		return nil, fmt.Errorf("SQL 不能为空")
 	}
@@ -1137,7 +1137,7 @@ func (s *SharkElastic) SqlRaw(ctx context.Context, sql string) ([]byte, error) {
 //
 // 返回：
 //   - error: 解析失败、缺少 from 子句、ES 请求失败或反序列化失败时返回错误
-func (s *SharkElastic) Find(ctx context.Context, sql string, result any) error {
+func (s *Client) Find(ctx context.Context, sql string, result any) error {
 	if strings.TrimSpace(sql) == "" {
 		return fmt.Errorf("SQL 不能为空")
 	}
@@ -1175,7 +1175,7 @@ func (s *SharkElastic) Find(ctx context.Context, sql string, result any) error {
 }
 
 // Page 执行分页 SQL 风格查询，将结果解码到 result 并返回总数。
-func (s *SharkElastic) Page(ctx context.Context, sql string, page int, pageSize int, result any) (int64, error) {
+func (s *Client) Page(ctx context.Context, sql string, page int, pageSize int, result any) (int64, error) {
 	if strings.TrimSpace(sql) == "" {
 		return 0, fmt.Errorf("SQL 不能为空")
 	}

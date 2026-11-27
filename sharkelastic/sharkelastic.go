@@ -55,7 +55,7 @@ type Config struct {
 // 返回值:
 //   - *SharkElastic: 包含已验证客户端的 SharkElastic 实例
 //   - error: 配置为空、客户端创建失败或 Ping 不通时返回错误
-func New(ctx context.Context, config *Config) (*SharkElastic, error) {
+func New(ctx context.Context, config *Config) (*Client, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config required")
 	}
@@ -75,7 +75,7 @@ func New(ctx context.Context, config *Config) (*SharkElastic, error) {
 		return nil, err
 	}
 
-	return &SharkElastic{
-		Client: client,
+	return &Client{
+		Elastic: client,
 	}, nil
 }

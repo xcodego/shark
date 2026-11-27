@@ -61,7 +61,7 @@ type TimerRedis interface {
 //   - 定时精度约为 1 秒，不适合毫秒级精度的场景
 //
 // 零值 Timer 不可直接使用，必须通过 NewTimer() 创建。
-type Timer struct {
+type Client struct {
 	ctx             context.Context           // 上下文，用于控制定时器生命周期（通过 ctx.Done() 优雅退出）
 	timerCallback   sync.Map                  // 定时器 ID → 回调函数的映射（内存存储，进程重启丢失）
 	timerKey        string                    // Redis ZSet 的 key，格式：{project}:timer:{name}-{id}
@@ -91,12 +91,12 @@ type Timer struct {
 //	    fmt.Println("订单超时，执行取消逻辑")
 //	    // orderService.Cancel(orderId)
 //	})
-func NewTimer(ctx context.Context, project string, name string, id string, redis TimerRedis, logger *zap.Logger) *Timer {
+func NewTimer(ctx context.Context, project string, name string, id string, redis TimerRedis, logger *zap.Logger) *Client {
 	pool, err := ants.NewPool(10)
 	if err != nil {
 		panic(fmt.Sprintf("sharktimer ants.NewPool: %v", err))
 	}
-	t := &Timer{
+	t := &Client{
 		ctx:           ctx,
 		redis:         redis,
 		logger:        logger,
@@ -109,7 +109,7 @@ func NewTimer(ctx context.Context, project string, name string, id string, redis
 	return t
 }
 
-func (t *Timer) logError(msg string, err error) {
+func (t *Client) logError(msg string, err error) {
 	if t.logger == nil {
 		return
 	}
@@ -126,7 +126,7 @@ func (t *Timer) logError(msg string, err error) {
 //  5. 若未找到回调函数，则调用 DefaultCallback（如果已设置）
 //
 // 退出条件：ctx.Done() 关闭时，释放协程池并退出。
-func (t *Timer) processTimer() {
+func (t *Client) processTimer() {
 	if t.redis == nil {
 		return
 	}
@@ -236,7 +236,7 @@ func (t *Timer) processTimer() {
 //
 //	// 如果用户在 30 分钟内主动取消，可以移除定时器
 //	// timer.RemoveTimer(timerId)
-func (t *Timer) AddTimer(durnation time.Duration, callback func()) string {
+func (t *Client) AddTimer(durnation time.Duration, callback func()) string {
 	// 使用 Snowflake 生成全局唯一定时器 ID
 	id := cast.ToString(t.snowFlake.Generate())
 	// 计算到期时间戳（毫秒）：当前时间 + 延迟时长
@@ -267,7 +267,7 @@ func (t *Timer) AddTimer(durnation time.Duration, callback func()) string {
 //	// 在任务触发前取消（例如用户提前完成了操作）
 //	timer.RemoveTimer(timerId)
 //	fmt.Println("定时器已取消")
-func (t *Timer) RemoveTimer(timerId string) {
+func (t *Client) RemoveTimer(timerId string) {
 	// 从内存中删除回调函数
 	t.timerCallback.Delete(timerId)
 	// 从 Redis ZSet 中删除定时任务
@@ -297,7 +297,7 @@ func (t *Timer) RemoveTimer(timerId string) {
 //
 //	// 可以在其他地方根据已知 ID 直接删除
 //	timer.RemoveTimer(fmt.Sprintf("order:cancel:%s", orderId))
-func (t *Timer) AddTimeWithId(timerId string, durnation time.Duration, callback func()) {
+func (t *Client) AddTimeWithId(timerId string, durnation time.Duration, callback func()) {
 	// 计算到期时间戳（毫秒）
 	timestamp := time.Now().Add(durnation).UnixMilli()
 	// 写入 Redis ZSet（若 member 已存在，ZAdd 会更新其 score）
@@ -329,6 +329,6 @@ func (t *Timer) AddTimeWithId(timerId string, durnation time.Duration, callback 
 //	        log.Printf("未找到定时器 %s 的回调配置", timerId)
 //	    }
 //	})
-func (t *Timer) DefaultCallback(cb func(timerId string)) {
+func (t *Client) DefaultCallback(cb func(timerId string)) {
 	t.defaultCallback = cb
 }

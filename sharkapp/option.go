@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/viper"
+	"github.com/xcodego/shark/sharkclickhouse"
 	"github.com/xcodego/shark/sharkdb"
 	"github.com/xcodego/shark/sharkelastic"
 	"github.com/xcodego/shark/sharketcd"
@@ -34,6 +35,7 @@ type Options struct {
 	redis_cluster *sharkredis.Config      // Redis 集群模式配置
 	redis_client  *sharkredis.Config      // Redis 单机/主从模式配置
 	elastic       *sharkelastic.Config    // Elasticsearch 配置
+	clickhouse    *sharkclickhouse.Config // ClickHouse 配置
 	project       string                  // 项目名称
 	mongodb       *sharkmongodb.Config    // MongoDB 配置
 	rabbitmq      *sharkrabbitmq.Config   // RabbitMQ 配置
@@ -107,6 +109,15 @@ func (o *Options) WithElastic(config *sharkelastic.Config) *Options {
 		return o
 	}
 	o.elastic = config
+	return o
+}
+
+// WithClickHouse 设置 ClickHouse 配置。
+func (o *Options) WithClickHouse(config *sharkclickhouse.Config) *Options {
+	if config == nil || len(config.Host) == 0 {
+		return o
+	}
+	o.clickhouse = config
 	return o
 }
 
@@ -356,6 +367,7 @@ func NewOptionWithRsaAndConfigFile(project string, name string, rsa string, conf
 	opts.parseRedis(v)
 	opts.parseDB(v)
 	opts.parseElastic(v)
+	opts.parseClickHouse(v)
 	opts.parseMinIO(v)
 	opts.parseKafka(v)
 	opts.parseMongoDB(v)
@@ -462,6 +474,21 @@ func (o *Options) parseElastic(v *viper.Viper) {
 		Host:     hosts,
 		User:     strings.TrimSpace(v.GetString("elastic.user")),
 		Password: o.decryptPassword(strings.TrimSpace(v.GetString("elastic.password"))),
+	}
+}
+
+// parseClickHouse 解析 ClickHouse 配置。
+func (o *Options) parseClickHouse(v *viper.Viper) {
+	hosts := readSlices(v, "clickhouse.host")
+	if len(hosts) == 0 {
+		return
+	}
+	o.clickhouse = &sharkclickhouse.Config{
+		Host:     hosts,
+		User:     strings.TrimSpace(v.GetString("clickhouse.user")),
+		Password: o.decryptPassword(strings.TrimSpace(v.GetString("clickhouse.password"))),
+		Database: strings.TrimSpace(v.GetString("clickhouse.database")),
+		TLS:      v.GetBool("clickhouse.tls"),
 	}
 }
 

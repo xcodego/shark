@@ -143,6 +143,7 @@ func (s *MyService) Start() {
 | `sharksql` | SQL 条件构建与分页 | `SqlBuilder`, `NewSql`, `LeftJoin`, `InnerJoin`, `PageQuery`, 40+ 函数 |
 | `sharkdecimal` | 高精度数值处理 | `Normalize`, `Normalize2`, `Normalize6` |
 | `sharkelastic` | Elasticsearch 客户端 | `SharkElastic`, `CreateIndex`, `Search`, `Insert` |
+| `sharkclickhouse` | ClickHouse 原生客户端 | `Config`, `New` |
 | `sharketcd` | etcd 分布式键值存储 | `New` (clientv3.Client) |
 | `sharkmongodb` | MongoDB 文档数据库 | `New` (mongo.Client) |
 | `sharkminio` | MinIO 对象存储 | `New` (minio.Client) |
@@ -649,6 +650,13 @@ resp, _ := es.Search(ctx, "users", map[string]any{
     "query": map[string]any{"match": map[string]any{"name": "张三"}},
 })
 ```
+
+### ClickHouse (`sharkclickhouse`)
+
+通过 `clickhouse.host`、`clickhouse.user`、`clickhouse.password`、
+`clickhouse.database`、`clickhouse.tls` 配置，或使用 `options.WithClickHouse`。
+地址使用原生协议端口（默认 9000，TLS 通常为 9440）；TLS 会验证服务器证书。
+通过 `app.ClickHouse` 使用原生客户端，`app.Hunt` 退出时关闭连接。
 
 ### 数据压缩 (`sharkzip`)
 

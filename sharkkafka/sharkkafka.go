@@ -68,7 +68,7 @@ type Config struct {
 //   - logger:  zap 日志记录器
 //
 // 零值 SharkKafka 不可直接使用，必须通过 New() 创建。
-type SharkKafka struct {
+type Client struct {
 	ctx     context.Context          // 上下文，用于控制消费者生命周期
 	config  *Config                  // 连接配置
 	writers map[string]*kafka.Writer // Writer 池，按 topic 缓存
@@ -126,7 +126,7 @@ type SharkKafka struct {
 //	    log.Fatalf("初始化 Kafka 失败: %v", err)
 //	}
 //	defer sk.Close()
-func New(ctx context.Context, config *Config, logger *zap.Logger) (*SharkKafka, error) {
+func New(ctx context.Context, config *Config, logger *zap.Logger) (*Client, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config required")
 	}
@@ -180,7 +180,7 @@ func New(ctx context.Context, config *Config, logger *zap.Logger) (*SharkKafka, 
 	if err != nil {
 		return nil, err
 	}
-	return &SharkKafka{
+	return &Client{
 		ctx:     ctx,
 		config:  config,
 		writers: make(map[string]*kafka.Writer),
@@ -200,7 +200,7 @@ type WriterConfig struct {
 }
 
 // Writer 返回 topic 对应的 Kafka writer；未缓存时按 cfg 创建。
-func (s *SharkKafka) Writer(topic string, cfg *WriterConfig) (*kafka.Writer, error) {
+func (s *Client) Writer(topic string, cfg *WriterConfig) (*kafka.Writer, error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	// 已缓存：直接返回
@@ -262,7 +262,7 @@ func (s *SharkKafka) Writer(topic string, cfg *WriterConfig) (*kafka.Writer, err
 //	if err != nil {
 //	    log.Printf("关闭 Writer 失败: %v", err)
 //	}
-func (s *SharkKafka) CloseWriter(topic string) error {
+func (s *Client) CloseWriter(topic string) error {
 	s.lock.Lock()
 	writer, ok := s.writers[topic]
 	if ok {
@@ -286,7 +286,7 @@ func (s *SharkKafka) CloseWriter(topic string) error {
 //
 //	sk, _ := sharkkafka.New(ctx, cfg, logger)
 //	defer sk.Close() // 应用退出时自动关闭所有 Writer
-func (s *SharkKafka) Close() error {
+func (s *Client) Close() error {
 	s.lock.Lock()
 	writers := s.writers
 	s.writers = make(map[string]*kafka.Writer) // 清空池
@@ -310,7 +310,7 @@ type ReaderConfig struct {
 }
 
 // Reader 为 topic 和消费组创建 Kafka reader。
-func (s *SharkKafka) Reader(topic string, group string, cfg *ReaderConfig) *kafka.Reader {
+func (s *Client) Reader(topic string, group string, cfg *ReaderConfig) *kafka.Reader {
 	if cfg == nil {
 		cfg = &ReaderConfig{
 			MinBytes:    sharkutils.Pointer(1),                 // 有数据就返回（低延迟）
@@ -352,7 +352,7 @@ type BatchConfig struct {
 }
 
 // BatchConsumer 按批消费消息；handler 返回 false 时停止消费。
-func (s *SharkKafka) BatchConsumer(topic string, group string, cfg *BatchConfig, handler func([]kafka.Message) bool) {
+func (s *Client) BatchConsumer(topic string, group string, cfg *BatchConfig, handler func([]kafka.Message) bool) {
 	if cfg == nil {
 		cfg = &BatchConfig{
 			ReaderConfig: ReaderConfig{

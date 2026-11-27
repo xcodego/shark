@@ -74,7 +74,7 @@ type connection struct {
 //   - project: 项目名，用作 Redis key 前缀
 //
 // 零值 RpcServer 不可直接使用，必须通过 New() 创建。
-type RpcServer struct {
+type Server struct {
 	ctx     context.Context    // 上下文，控制后台协程生命周期
 	Server  *grpc.Server       // gRPC 服务端实例，通过此字段注册 protobuf 服务
 	logger  *zap.Logger        // zap 日志记录器
@@ -112,8 +112,8 @@ type RpcServer struct {
 //	// 仅作为客户端
 //	clientOnly := sharkgrpc.New(ctx, "myproject", rdb, logger, 0)
 //	conn, _ := clientOnly.GetRpcConnection("payment-service")
-func New(ctx context.Context, project string, redis RpcRedis, logger *zap.Logger, port int) *RpcServer {
-	s := &RpcServer{
+func New(ctx context.Context, project string, redis RpcRedis, logger *zap.Logger, port int) *Server {
+	s := &Server{
 		ctx:     ctx,
 		logger:  logger,
 		redis:   redis,
@@ -130,7 +130,7 @@ func New(ctx context.Context, project string, redis RpcRedis, logger *zap.Logger
 //
 // port <= 0 时直接返回。否则在指定端口 Listen 并 Serve，无额外延迟。
 // Listen/Serve 失败时记日志后返回（不 panic）。
-func (s *RpcServer) Run() {
+func (s *Server) Run() {
 	if s.port <= 0 {
 		return
 	}
@@ -165,7 +165,7 @@ func (s *RpcServer) Run() {
 //  2. 循环：每隔 5 秒从 Redis 读取地址列表
 //  3. 对比新旧地址列表（排序后逐元素比较）
 //  4. 若地址变化，通过 manual.Resolver.UpdateState 推送新地址
-func (s *RpcServer) updateResolver(name string) {
+func (s *Server) updateResolver(name string) {
 	v, ok := connections.Load(name)
 	if !ok {
 		return
@@ -234,7 +234,7 @@ func (s *RpcServer) updateResolver(name string) {
 //
 //	// project="myapp", name="order-service"
 //	// 返回: "myapp:grpc:order-service"
-func (s *RpcServer) redisGrpcHost(name string) string {
+func (s *Server) redisGrpcHost(name string) string {
 	return fmt.Sprintf("%v:grpc:%v", s.project, name)
 }
 
@@ -280,7 +280,7 @@ func (s *RpcServer) redisGrpcHost(name string) string {
 //	if err != nil {
 //	    log.Printf("创建订单失败: %v", err)
 //	}
-func (s *RpcServer) GetRpcConnection(name string) (*grpc.ClientConn, error) {
+func (s *Server) GetRpcConnection(name string) (*grpc.ClientConn, error) {
 	if s.redis == nil {
 		return nil, fmt.Errorf("GetRpcConnection redis未初始化")
 	}
