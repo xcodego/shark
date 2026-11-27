@@ -106,7 +106,7 @@ type App struct {
 	// sharklog 封装 Shark 日志组件。
 	sharklog *sharklog.SharkLog
 	// muxServe 是 pprof HTTP 路由复用器。
-	muxServe *http.ServeMux
+	pprofServe *http.ServeMux
 }
 
 // New 根据配置创建 App，并初始化已配置的中间件和服务。
@@ -382,9 +382,9 @@ func New(options *Options) (*App, error) {
 // pprof 在指定端口启动性能分析服务。
 func (a *App) pprof(port int) {
 	a.Logger.Info("开启pprof服务", zap.Int("port", port))
-	a.muxServe = http.NewServeMux()
-	a.muxServe.HandleFunc("/debug/pprof/", pprof.Index)
-	err := http.ListenAndServe(fmt.Sprintf(":%v", port), a.muxServe)
+	a.pprofServe = http.NewServeMux()
+	a.pprofServe.HandleFunc("/debug/pprof/", pprof.Index)
+	err := http.ListenAndServe(fmt.Sprintf(":%v", port), a.pprofServe)
 	if err != nil {
 		a.Logger.Error("pprof服务启动失败", zap.Int("port", port), zap.Error(err))
 	}
