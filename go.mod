@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.51.0
-	github.com/bytedance/sonic v1.15.1
+	github.com/bytedance/sonic v1.15.5
 	github.com/elastic/go-elasticsearch/v9 v9.4.1
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-mysql-org/go-mysql v1.16.0
@@ -49,7 +49,7 @@ require (
 	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
-	github.com/bytedance/sonic/loader v0.5.1 // indirect
+	github.com/bytedance/sonic/loader v0.5.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect
